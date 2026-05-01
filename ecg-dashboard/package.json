@@ -1,0 +1,37 @@
+{
+  "name": "ecg-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.1",
+    "@aws-amplify/ui-react": "^6.15.3",
+    "@aws-sdk/client-dynamodb": "^3.1039.0",
+    "@aws-sdk/client-iot": "^3.1039.0",
+    "@aws-sdk/credential-providers": "^3.1039.0",
+    "@aws-sdk/util-dynamodb": "^3.996.2",
+    "@types/crypto-js": "^4.2.2",
+    "aws-amplify": "^6.16.4",
+    "crypto-js": "^4.2.0",
+    "mqtt": "^5.15.1",
+    "next": "16.2.4",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "recharts": "^3.8.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.4",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

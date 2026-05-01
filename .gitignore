@@ -1,0 +1,47 @@
+# ── Secrets & certs ──────────────────────────────────────
+certs/
+*.pem
+*.private.key
+*.public.key
+*.crt
+*.key
+*.zip
+.env
+.env.local
+.env.*.local
+.env.production
+
+# ── Python ───────────────────────────────────────────────
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.pytest_cache/
+.mypy_cache/
+
+# ── Node / Next.js (ecg-dashboard) ───────────────────────
+ecg-dashboard/node_modules/
+ecg-dashboard/.next/
+ecg-dashboard/out/
+ecg-dashboard/.amplify/
+
+# ── AWS / Amplify ─────────────────────────────────────────
+amplify/
+.amplify/
+amplify-backup/
+aws-exports.js
+
+# ── Jupyter ───────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── OS ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
