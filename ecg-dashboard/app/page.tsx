@@ -86,6 +86,15 @@ export default function DashboardPage() {
         <p className="text-xs text-gray-500 uppercase tracking-wider mb-4">Xác suất phân loại (Edge)</p>
         <ProbBar probs={probs} />
       </div>
+
+      {/* DEBUG PANEL — xóa sau khi fix xong */}
+      <div className="bg-yellow-950/30 border border-yellow-800 rounded-xl p-4 text-xs font-mono space-y-1">
+        <p className="text-yellow-500 font-bold mb-2">DEBUG (xóa sau khi fix)</p>
+        <p className="text-gray-400">AWS connected: <span className="text-white">{String(connected)}</span></p>
+        <p className="text-gray-400">Device online: <span className="text-white">{String(deviceOnline)}</span></p>
+        <p className="text-gray-400">waveform.length: <span className="text-white">{waveform.length}</span></p>
+        <p className="text-gray-400">lastResult: <span className="text-white">{lastResult ? JSON.stringify({ label: lastResult.label, conf: lastResult.confidence, hasSamples: !!(lastResult as {samples?:number[]}).samples?.length }) : 'null'}</span></p>
+      </div>
     </div>
   );
 }

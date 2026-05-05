@@ -13,6 +13,7 @@ export interface EcgResult {
   leads_on:          boolean;
   needs_cloud_check: boolean;
   probs:             number[];
+  samples?:          number[];   // downsampled beat, added by ESP32 fix
 }
 
 export interface EcgAlert {
@@ -34,21 +35,24 @@ export interface EcgRaw {
 }
 
 interface EcgStreamState {
-  lastResult:    EcgResult | null;
-  lastAlert:     EcgAlert  | null;
-  waveform:      number[];           // rolling window for display
-  connected:     boolean;            // WebSocket đến AWS
-  deviceOnline:  boolean;            // ESP32 có đang gửi data không
-  bpm:           number | null;
+  lastResult:   EcgResult | null;
+  lastAlert:    EcgAlert  | null;
+  waveform:     number[];
+  connected:    boolean;
+  deviceOnline: boolean;
+  bpm:          number | null;
 }
 
-const WAVEFORM_DISPLAY  = 374;    // ~2 beats (47 samples/beat × 2 → hiển thị tốt)
-const DEVICE_TIMEOUT_MS = 10_000; // nếu không có ecg/result trong 10s → offline
+const WAVEFORM_DISPLAY  = 376;    // ~8 beats × 47 samples
+const DEVICE_TIMEOUT_MS = 10_000;
 
 export function useEcgStream() {
-  const clientRef      = useRef<MqttClient | null>(null);
-  const lastBeatTs     = useRef<number>(0);
+  const clientRef       = useRef<MqttClient | null>(null);
+  const lastBeatTs      = useRef<number>(0);
   const lastDeviceMsgTs = useRef<number>(0);
+
+  // Dùng ref cho waveform để tránh stale closure trong message handler
+  const waveformRef = useRef<number[]>([]);
 
   const [state, setState] = useState<EcgStreamState>({
     lastResult:   null,
@@ -59,6 +63,58 @@ export function useEcgStream() {
     bpm:          null,
   });
 
+  // handleMessage dùng ref → không bao giờ stale
+  const handleMessage = useCallback((topic: string, payload: Buffer) => {
+    let data: unknown;
+    try {
+      data = JSON.parse(payload.toString());
+    } catch {
+      return;
+    }
+
+    const now = Date.now();
+
+    if (topic === 'ecg/result') {
+      const r = data as EcgResult;
+      const bpm = lastBeatTs.current
+        ? Math.round(60000 / (now - lastBeatTs.current))
+        : null;
+      lastBeatTs.current      = now;
+      lastDeviceMsgTs.current = now;
+
+      if (r.samples?.length) {
+        const next = [...waveformRef.current, ...r.samples].slice(-WAVEFORM_DISPLAY);
+        waveformRef.current = next;
+        setState(s => ({
+          ...s,
+          lastResult:   r,
+          deviceOnline: true,
+          waveform:     next,
+          bpm: bpm && bpm > 20 && bpm < 250 ? bpm : s.bpm,
+        }));
+      } else {
+        setState(s => ({
+          ...s,
+          lastResult:   r,
+          deviceOnline: true,
+          bpm: bpm && bpm > 20 && bpm < 250 ? bpm : s.bpm,
+        }));
+      }
+    }
+
+    if (topic === 'ecg/raw') {
+      const r = data as EcgRaw;
+      lastDeviceMsgTs.current = now;
+      const next = [...waveformRef.current, ...r.samples].slice(-WAVEFORM_DISPLAY);
+      waveformRef.current = next;
+      setState(s => ({ ...s, waveform: next, deviceOnline: true }));
+    }
+
+    if (topic === 'ecg/alert') {
+      setState(s => ({ ...s, lastAlert: data as EcgAlert }));
+    }
+  }, []);
+
   const connect = useCallback(async () => {
     try {
       const session     = await fetchAuthSession();
@@ -66,8 +122,6 @@ export function useEcgStream() {
       if (!credentials) throw new Error('No credentials');
 
       const { accessKeyId, secretAccessKey, sessionToken } = credentials;
-
-      // Build AWS SigV4-signed WebSocket URL for IoT Core
       const url = buildWssUrl(IOT_ENDPOINT, AWS_REGION, accessKeyId, secretAccessKey, sessionToken!);
 
       const client = mqtt.connect(url, {
@@ -81,12 +135,8 @@ export function useEcgStream() {
         setState(s => ({ ...s, connected: true }));
       });
 
-      client.on('message', (topic, payload) => {
-        try {
-          const data = JSON.parse(payload.toString());
-          handleMessage(topic, data);
-        } catch { /* ignore malformed */ }
-      });
+      // Truyền payload thô vào handler — không parse ở đây để tránh stale closure
+      client.on('message', (topic, payload) => handleMessage(topic, payload));
 
       client.on('close', () => setState(s => ({ ...s, connected: false })));
       client.on('error',  (err) => console.error('[MQTT]', err));
@@ -95,52 +145,13 @@ export function useEcgStream() {
     } catch (err) {
       console.error('[useEcgStream] connect error:', err);
     }
-  }, []);
+  }, [handleMessage]);
 
-  function handleMessage(topic: string, data: unknown) {
-    if (topic === 'ecg/result') {
-      const r = data as EcgResult & { samples?: number[] };
-      const now = Date.now();
-      const bpm = lastBeatTs.current
-        ? Math.round(60000 / (now - lastBeatTs.current))
-        : null;
-      lastBeatTs.current    = now;
-      lastDeviceMsgTs.current = now;
-
-      setState(s => {
-        // Nếu ecg/result có samples (downsampled từ ESP32) → thêm vào waveform
-        const next = r.samples?.length
-          ? [...s.waveform, ...r.samples].slice(-WAVEFORM_DISPLAY)
-          : s.waveform;
-        return {
-          ...s,
-          lastResult:   r,
-          deviceOnline: true,
-          waveform:     next,
-          bpm: bpm && bpm > 20 && bpm < 250 ? bpm : s.bpm,
-        };
-      });
-    }
-
-    if (topic === 'ecg/raw') {
-      const r = data as EcgRaw;
-      lastDeviceMsgTs.current = Date.now();
-      setState(s => {
-        const next = [...s.waveform, ...r.samples].slice(-WAVEFORM_DISPLAY);
-        return { ...s, waveform: next, deviceOnline: true };
-      });
-    }
-
-    if (topic === 'ecg/alert') {
-      setState(s => ({ ...s, lastAlert: data as EcgAlert }));
-    }
-  }
-
-  // Heartbeat watchdog: đánh dấu device offline nếu im lặng > 10s
+  // Watchdog: device offline nếu im lặng > 10s
   useEffect(() => {
     const id = setInterval(() => {
-      const silent = Date.now() - lastDeviceMsgTs.current;
-      if (lastDeviceMsgTs.current > 0 && silent > DEVICE_TIMEOUT_MS) {
+      if (lastDeviceMsgTs.current > 0 &&
+          Date.now() - lastDeviceMsgTs.current > DEVICE_TIMEOUT_MS) {
         setState(s => s.deviceOnline ? { ...s, deviceOnline: false } : s);
       }
     }, 2000);
@@ -188,16 +199,13 @@ function buildWssUrl(host: string, region: string, ak: string, sk: string, st: s
   return `wss://${host}/mqtt?${canonicalQS}&X-Amz-Signature=${sig}`;
 }
 
-// ── Crypto helpers (Web Crypto via subtle is async; use pure-JS for URL signing) ──
 import CryptoJS from 'crypto-js';
 
-function sha256(msg: string)             { return CryptoJS.SHA256(msg).toString(); }
+function sha256(msg: string) { return CryptoJS.SHA256(msg).toString(); }
 function hmac(key: CryptoJS.lib.WordArray | string, msg: string) {
   return CryptoJS.HmacSHA256(msg, key);
 }
-function hmacHex(key: CryptoJS.lib.WordArray, msg: string) {
-  return hmac(key, msg).toString();
-}
+function hmacHex(key: CryptoJS.lib.WordArray, msg: string) { return hmac(key, msg).toString(); }
 function getSignatureKey(key: string, date: string, region: string, service: string) {
   return hmac(hmac(hmac(hmac(`AWS4${key}`, date), region), service), 'aws4_request');
 }
