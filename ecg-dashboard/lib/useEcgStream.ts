@@ -34,25 +34,29 @@ export interface EcgRaw {
 }
 
 interface EcgStreamState {
-  lastResult:  EcgResult | null;
-  lastAlert:   EcgAlert  | null;
-  waveform:    number[];           // rolling 187-sample window for display
-  connected:   boolean;
-  bpm:         number | null;
+  lastResult:    EcgResult | null;
+  lastAlert:     EcgAlert  | null;
+  waveform:      number[];           // rolling window for display
+  connected:     boolean;            // WebSocket đến AWS
+  deviceOnline:  boolean;            // ESP32 có đang gửi data không
+  bpm:           number | null;
 }
 
-const WAVEFORM_DISPLAY = 374;     // 2 beats worth of samples for display
+const WAVEFORM_DISPLAY  = 374;    // ~2 beats (47 samples/beat × 2 → hiển thị tốt)
+const DEVICE_TIMEOUT_MS = 10_000; // nếu không có ecg/result trong 10s → offline
 
 export function useEcgStream() {
-  const clientRef = useRef<MqttClient | null>(null);
-  const lastBeatTs = useRef<number>(0);
+  const clientRef      = useRef<MqttClient | null>(null);
+  const lastBeatTs     = useRef<number>(0);
+  const lastDeviceMsgTs = useRef<number>(0);
 
   const [state, setState] = useState<EcgStreamState>({
-    lastResult:  null,
-    lastAlert:   null,
-    waveform:    [],
-    connected:   false,
-    bpm:         null,
+    lastResult:   null,
+    lastAlert:    null,
+    waveform:     [],
+    connected:    false,
+    deviceOnline: false,
+    bpm:          null,
   });
 
   const connect = useCallback(async () => {
@@ -95,20 +99,35 @@ export function useEcgStream() {
 
   function handleMessage(topic: string, data: unknown) {
     if (topic === 'ecg/result') {
-      const r = data as EcgResult;
+      const r = data as EcgResult & { samples?: number[] };
       const now = Date.now();
       const bpm = lastBeatTs.current
         ? Math.round(60000 / (now - lastBeatTs.current))
         : null;
-      lastBeatTs.current = now;
-      setState(s => ({ ...s, lastResult: r, bpm: bpm && bpm > 20 && bpm < 250 ? bpm : s.bpm }));
+      lastBeatTs.current    = now;
+      lastDeviceMsgTs.current = now;
+
+      setState(s => {
+        // Nếu ecg/result có samples (downsampled từ ESP32) → thêm vào waveform
+        const next = r.samples?.length
+          ? [...s.waveform, ...r.samples].slice(-WAVEFORM_DISPLAY)
+          : s.waveform;
+        return {
+          ...s,
+          lastResult:   r,
+          deviceOnline: true,
+          waveform:     next,
+          bpm: bpm && bpm > 20 && bpm < 250 ? bpm : s.bpm,
+        };
+      });
     }
 
     if (topic === 'ecg/raw') {
       const r = data as EcgRaw;
+      lastDeviceMsgTs.current = Date.now();
       setState(s => {
         const next = [...s.waveform, ...r.samples].slice(-WAVEFORM_DISPLAY);
-        return { ...s, waveform: next };
+        return { ...s, waveform: next, deviceOnline: true };
       });
     }
 
@@ -116,6 +135,17 @@ export function useEcgStream() {
       setState(s => ({ ...s, lastAlert: data as EcgAlert }));
     }
   }
+
+  // Heartbeat watchdog: đánh dấu device offline nếu im lặng > 10s
+  useEffect(() => {
+    const id = setInterval(() => {
+      const silent = Date.now() - lastDeviceMsgTs.current;
+      if (lastDeviceMsgTs.current > 0 && silent > DEVICE_TIMEOUT_MS) {
+        setState(s => s.deviceOnline ? { ...s, deviceOnline: false } : s);
+      }
+    }, 2000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     connect();

@@ -5,7 +5,7 @@ import ClassBadge from '@/components/ClassBadge';
 import ProbBar from '@/components/ProbBar';
 
 export default function DashboardPage() {
-  const { lastResult, lastAlert, waveform, connected, bpm } = useEcgStream();
+  const { lastResult, lastAlert, waveform, connected, deviceOnline, bpm } = useEcgStream();
 
   const label = lastResult?.label ?? 'Normal';
   const conf  = lastResult ? Math.round(lastResult.confidence * 100) : 0;
@@ -19,9 +19,17 @@ export default function DashboardPage() {
           <h1 className="text-xl font-bold">Dashboard realtime</h1>
           <p className="text-sm text-gray-500">ecg-device-001</p>
         </div>
-        <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
-          <span className="text-xs text-gray-400">{connected ? 'Đã kết nối' : 'Mất kết nối'}</span>
+        <div className="flex items-center gap-3">
+          {/* AWS WebSocket */}
+          <div className="flex items-center gap-1">
+            <span className={`w-2 h-2 rounded-full ${connected ? 'bg-blue-400' : 'bg-gray-600'}`} />
+            <span className="text-xs text-gray-500">AWS</span>
+          </div>
+          {/* ESP32 device */}
+          <div className="flex items-center gap-1">
+            <span className={`w-2 h-2 rounded-full ${deviceOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+            <span className="text-xs text-gray-400">{deviceOnline ? 'Thiết bị online' : 'Thiết bị offline'}</span>
+          </div>
         </div>
       </div>
 
