@@ -112,6 +112,16 @@ export function useEcgStream() {
       const credentials = session.credentials;
       if (!credentials) throw new Error('No credentials from Identity Pool');
 
+      // Auto-attach IoT Policy cho identity này (server-side, idempotent)
+      const identityId = (session as { identityId?: string }).identityId;
+      if (identityId) {
+        await fetch('/api/iot-attach', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ identityId }),
+        }).catch(() => {}); // không block nếu fail
+      }
+
       const { accessKeyId, secretAccessKey, sessionToken } = credentials;
       const url = await buildWssUrl(IOT_ENDPOINT, AWS_REGION, accessKeyId, secretAccessKey, sessionToken!);
 
