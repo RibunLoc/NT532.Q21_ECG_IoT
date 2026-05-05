@@ -63,7 +63,10 @@ def lambda_handler(event, _context):
     """
     try:
         device_id  = event['device_id']
-        ts         = int(event.get('timestamp', time.time()))
+        # ESP32 gửi millis() (ms từ khi boot), gateway thêm server_time (Unix ms thật)
+        # Ưu tiên server_time, fallback về time.time() nếu không có
+        raw_ts = event.get('server_time') or event.get('timestamp', 0)
+        ts = int(raw_ts / 1000) if raw_ts > 1_000_000_000_000 else int(raw_ts) or int(time.time())
         edge_label = event.get('edge_label', 'unknown')
         edge_conf  = float(event.get('edge_confidence', 0.0))
         samples    = event['samples']

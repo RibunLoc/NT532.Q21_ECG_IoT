@@ -4,7 +4,7 @@
 #define WIFI_SSID "ThaoNhi T2"
 #define WIFI_PASSWORD "31121997"
 
-#define MQTT_BROKER  "192.168.1.9"
+#define MQTT_BROKER  "192.168.1.15"
 #define MQTT_PORT 1883
 #define MQTT_CLIENT "ecg-device-001" // Phải khớp trên cloud Dynamodb
 

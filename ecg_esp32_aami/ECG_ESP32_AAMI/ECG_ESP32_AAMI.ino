@@ -21,6 +21,7 @@
 #include "normalize.h"
 #include "r_peak_detector.h"
 #include "inference.h"
+#include "oled_display.h"
 
 #if DEMO_MODE
 #include "fake_ecg.h"
@@ -29,6 +30,15 @@
 // ── Globals ─────────────────────────────────────────────
 WiFiClient    wifiClient;
 PubSubClient  mqtt(wifiClient);
+
+// OLED state (cập nhật mỗi khi có kết quả inference mới)
+static const char* oled_label = "---";
+static float       oled_conf  = 0.0f;
+static int         oled_bpm   = 0;
+
+// Refresh OLED mỗi ~100ms độc lập với sampling rate
+static unsigned long last_oled_ms = 0;
+const unsigned long OLED_REFRESH_MS = 100;
 
 // Sliding buffer: sau moi inference, shift 270 samples cuoi len dau
 static float  ecg_buffer[BUFFER_SIZE];        // 540 floats
@@ -65,7 +75,8 @@ void connectMQTT() {
 
 // ── Publishing ──────────────────────────────────────────
 void publishResult(const InferenceResult& r, bool needs_cloud_check) {
-    StaticJsonDocument<384> doc;
+    // Đủ chỗ cho 5 probs + 47 samples downsampled (~600B)
+    StaticJsonDocument<768> doc;
     doc["device_id"]        = MQTT_CLIENT;
     doc["timestamp"]        = millis();
     doc["label"]            = r.label_name;
@@ -74,11 +85,15 @@ void publishResult(const InferenceResult& r, bool needs_cloud_check) {
     doc["leads_on"]         = leads_on;
     doc["needs_cloud_check"]= needs_cloud_check;
 
-    // Tat ca 5 probabilities (debug + cloud co the dung)
     JsonArray probs = doc.createNestedArray("probs");
     for (int i = 0; i < 5; i++) probs.add(r.all_probs[i]);
 
-    char buf[384];
+    // Downsample beat_window 187→47 (mỗi 4 sample lấy 1) để dashboard vẽ sóng
+    // Normal beat cũng cần waveform — không chỉ abnormal mới có
+    JsonArray wave = doc.createNestedArray("samples");
+    for (int i = 0; i < SAMPLE_COUNT; i += 4) wave.add(beat_window[i]);
+
+    char buf[768];
     size_t n = serializeJson(doc, buf);
     mqtt.publish(TOPIC_RESULT, buf, n);
 
@@ -141,6 +156,11 @@ void process_beat() {
     unsigned long dt = micros() - t0;
     Serial.printf("[CNN] %s conf=%.2f (%lu us)\n", r.label_name, r.confidence, dt);
 
+    // Cập nhật OLED state sau mỗi inference
+    oled_label = r.label_name;
+    oled_conf  = r.confidence;
+    oled_bpm   = oledUpdateBPM();
+
     // 6. Cascade decision
     bool is_normal_confident = (r.label_index == 0 &&
                                  r.confidence >= EDGE_CONFIDENCE_THRESHOLD);
@@ -161,6 +181,8 @@ void setup() {
 
     pinMode(LO_PLUS,  INPUT);
     pinMode(LO_MINUS, INPUT);
+
+    setupOLED();   // Khởi tạo OLED trước khi kết nối WiFi (hiện boot screen)
 
     connectWiFi();
     mqtt.setServer(MQTT_BROKER, MQTT_PORT);
@@ -188,10 +210,16 @@ void loop() {
 
     if (!leads_on) {
         sample_index = 0;
+        oled_label = "Leads Off";
+        oled_conf  = 0.0f;
         unsigned long now = millis();
         if (now - last_leads_off_publish >= LEADS_OFF_INTERVAL_MS) {
             publishLeadsOff();
             last_leads_off_publish = now;
+        }
+        if (now - last_oled_ms >= OLED_REFRESH_MS) {
+            oledDraw(oled_label, oled_conf, false, 0);
+            last_oled_ms = now;
         }
         delay(100);
         return;
@@ -202,6 +230,7 @@ void loop() {
 #endif
 
     ecg_buffer[sample_index++] = val;
+    oledPushSample(val);   // đẩy từng sample vào scroll buffer
 
     // Buffer day → process beat
     if (sample_index >= BUFFER_SIZE) {
@@ -210,6 +239,13 @@ void loop() {
         // Sliding window: giu 270 samples cuoi, sample tiep tu day
         memmove(ecg_buffer, ecg_buffer + 270, 270 * sizeof(float));
         sample_index = 270;
+    }
+
+    // Refresh OLED mỗi 100ms (không block sampling)
+    unsigned long now_ms = millis();
+    if (now_ms - last_oled_ms >= OLED_REFRESH_MS) {
+        oledDraw(oled_label, oled_conf, leads_on, oled_bpm);
+        last_oled_ms = now_ms;
     }
 
     // Sampling rate 360 Hz → moi sample cach nhau 2778 us

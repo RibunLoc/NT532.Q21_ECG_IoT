@@ -13,7 +13,7 @@ export interface EcgResult {
   leads_on:          boolean;
   needs_cloud_check: boolean;
   probs:             number[];
-  samples?:          number[];   // downsampled beat, added by ESP32 fix
+  samples?:          number[];
 }
 
 export interface EcgAlert {
@@ -43,16 +43,15 @@ interface EcgStreamState {
   bpm:          number | null;
 }
 
-const WAVEFORM_DISPLAY  = 376;    // ~8 beats × 47 samples
+const WAVEFORM_DISPLAY  = 376;
 const DEVICE_TIMEOUT_MS = 10_000;
 
 export function useEcgStream() {
-  const clientRef       = useRef<MqttClient | null>(null);
-  const lastBeatTs      = useRef<number>(0);
-  const lastDeviceMsgTs = useRef<number>(0);
-
-  // Dùng ref cho waveform để tránh stale closure trong message handler
-  const waveformRef = useRef<number[]>([]);
+  const clientRef         = useRef<MqttClient | null>(null);
+  const lastBeatTs        = useRef<number>(0);
+  const lastDeviceMsgTs   = useRef<number>(0);
+  const waveformRef       = useRef<number[]>([]);
+  const connectingRef     = useRef(false);
 
   const [state, setState] = useState<EcgStreamState>({
     lastResult:   null,
@@ -63,14 +62,9 @@ export function useEcgStream() {
     bpm:          null,
   });
 
-  // handleMessage dùng ref → không bao giờ stale
   const handleMessage = useCallback((topic: string, payload: Buffer) => {
     let data: unknown;
-    try {
-      data = JSON.parse(payload.toString());
-    } catch {
-      return;
-    }
+    try { data = JSON.parse(payload.toString()); } catch { return; }
 
     const now = Date.now();
 
@@ -86,17 +80,12 @@ export function useEcgStream() {
         const next = [...waveformRef.current, ...r.samples].slice(-WAVEFORM_DISPLAY);
         waveformRef.current = next;
         setState(s => ({
-          ...s,
-          lastResult:   r,
-          deviceOnline: true,
-          waveform:     next,
+          ...s, lastResult: r, deviceOnline: true, waveform: next,
           bpm: bpm && bpm > 20 && bpm < 250 ? bpm : s.bpm,
         }));
       } else {
         setState(s => ({
-          ...s,
-          lastResult:   r,
-          deviceOnline: true,
+          ...s, lastResult: r, deviceOnline: true,
           bpm: bpm && bpm > 20 && bpm < 250 ? bpm : s.bpm,
         }));
       }
@@ -116,43 +105,47 @@ export function useEcgStream() {
   }, []);
 
   const connect = useCallback(async () => {
+    if (connectingRef.current) return;
+    connectingRef.current = true;
     try {
       const session     = await fetchAuthSession();
       const credentials = session.credentials;
-      console.log('[MQTT] session tokens:', session.tokens ? 'OK' : 'MISSING');
-      console.log('[MQTT] identityId:', (session as {identityId?: string}).identityId ?? 'not in session — check below');
-      console.log('[MQTT] credentials:', credentials
-        ? `accessKeyId=${credentials.accessKeyId?.slice(0,8)}... sessionToken=${credentials.sessionToken ? 'present' : 'MISSING'}`
-        : 'NULL — Identity Pool chưa cấp credentials');
       if (!credentials) throw new Error('No credentials from Identity Pool');
 
       const { accessKeyId, secretAccessKey, sessionToken } = credentials;
-      const url = buildWssUrl(IOT_ENDPOINT, AWS_REGION, accessKeyId, secretAccessKey, sessionToken!);
-      console.log('[MQTT] connecting to:', url.slice(0, 80) + '...');
+      const url = await buildWssUrl(IOT_ENDPOINT, AWS_REGION, accessKeyId, secretAccessKey, sessionToken!);
 
+      const clientId = `ecg-dashboard-${Math.random().toString(16).slice(2, 10)}`;
       const client = mqtt.connect(url, {
         protocolVersion: 4,
-        reconnectPeriod:  5000,
-        keepalive:        30,
+        protocolId:      'MQTT',
+        reconnectPeriod: 0,
+        keepalive:       30,
+        clientId,
+        clean:           true,
       });
 
       client.on('connect', () => {
-        console.log('[MQTT] WebSocket connected to AWS IoT!');
         client.subscribe(['ecg/result', 'ecg/raw', 'ecg/alert'], { qos: 1 });
         setState(s => ({ ...s, connected: true }));
+        connectingRef.current = false;
       });
 
-      // Truyền payload thô vào handler — không parse ở đây để tránh stale closure
       client.on('message', (topic, payload) => handleMessage(topic, payload));
 
-      client.on('close',     ()    => { console.warn('[MQTT] connection closed'); setState(s => ({ ...s, connected: false })); });
-      client.on('error',     (err) => console.error('[MQTT] error:', err));
-      client.on('offline',   ()    => console.warn('[MQTT] client offline'));
-      client.on('reconnect', ()    => console.log('[MQTT] reconnecting...'));
+      client.on('close', () => {
+        setState(s => ({ ...s, connected: false }));
+        connectingRef.current = false;
+        setTimeout(() => connect(), 5000);
+      });
+
+      client.on('error', (err) => console.error('[MQTT]', err));
 
       clientRef.current = client;
     } catch (err) {
-      console.error('[useEcgStream] FATAL connect error:', err);
+      console.error('[MQTT] connect error:', err);
+      connectingRef.current = false;
+      setTimeout(() => connect(), 5000);
     }
   }, [handleMessage]);
 
@@ -175,48 +168,57 @@ export function useEcgStream() {
   return state;
 }
 
-// ── AWS SigV4 WebSocket URL builder ──────────────────────────────────────────
-function buildWssUrl(host: string, region: string, ak: string, sk: string, st: string): string {
-  const now     = new Date();
-  const date    = formatDate(now);
-  const time    = formatDateTime(now);
-  const service = 'iotdevicegateway';
-  const algo    = 'AWS4-HMAC-SHA256';
+// ── AWS SigV4 WebSocket URL (Web Crypto API) ─────────────────────────────────
+async function buildWssUrl(
+  host: string, region: string, ak: string, sk: string, st: string
+): Promise<string> {
+  const now       = new Date();
+  const date      = now.toISOString().slice(0, 10).replace(/-/g, '');
+  const dateTime  = now.toISOString().slice(0, 19).replace(/[-:]/g, '') + 'Z';
+  const service   = 'iotdevicegateway';
+  const algo      = 'AWS4-HMAC-SHA256';
+  const credScope = `${date}/${region}/${service}/aws4_request`;
 
-  const credScope  = `${date}/${region}/${service}/aws4_request`;
-  const signedHdrs = 'host';
+  // Canonical QS — KHÔNG có X-Amz-Security-Token (append sau khi ký)
+  const signingParams: [string, string][] = [
+    ['X-Amz-Algorithm',    algo],
+    ['X-Amz-Credential',   `${ak}/${credScope}`],
+    ['X-Amz-Date',         dateTime],
+    ['X-Amz-Expires',      '86400'],
+    ['X-Amz-SignedHeaders', 'host'],
+  ];
+  signingParams.sort(([a], [b]) => a < b ? -1 : 1);
+  const canonicalQS = signingParams
+    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+    .join('&');
 
-  const canonicalQS = [
-    `X-Amz-Algorithm=${algo}`,
-    `X-Amz-Credential=${encodeURIComponent(`${ak}/${credScope}`)}`,
-    `X-Amz-Date=${time}`,
-    `X-Amz-Expires=86400`,
-    `X-Amz-Security-Token=${encodeURIComponent(st)}`,
-    `X-Amz-SignedHeaders=${signedHdrs}`,
-  ].join('&');
+  const canonicalReq = ['GET', '/mqtt', canonicalQS, `host:${host}\n`, 'host', await sha256hex('')].join('\n');
+  const strToSign    = [algo, dateTime, credScope, await sha256hex(canonicalReq)].join('\n');
+  const sigKey       = await getSignatureKey(sk, date, region, service);
+  const sig          = await hmacHex(sigKey, strToSign);
 
-  const canonicalReq = [
-    'GET', '/mqtt', canonicalQS,
-    `host:${host}\n`, signedHdrs, sha256(''),
-  ].join('\n');
-
-  const strToSign = [algo, time, credScope, sha256(canonicalReq)].join('\n');
-
-  const sigKey = getSignatureKey(sk, date, region, service);
-  const sig    = hmacHex(sigKey, strToSign);
-
-  return `wss://${host}/mqtt?${canonicalQS}&X-Amz-Signature=${sig}`;
+  return `wss://${host}/mqtt?${canonicalQS}&X-Amz-Security-Token=${encodeURIComponent(st)}&X-Amz-Signature=${sig}`;
 }
 
-import CryptoJS from 'crypto-js';
+async function sha256hex(msg: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(msg));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
 
-function sha256(msg: string) { return CryptoJS.SHA256(msg).toString(); }
-function hmac(key: CryptoJS.lib.WordArray | string, msg: string) {
-  return CryptoJS.HmacSHA256(msg, key);
+async function hmacRaw(key: ArrayBuffer | string, msg: string): Promise<ArrayBuffer> {
+  const keyData = typeof key === 'string' ? new TextEncoder().encode(key) : key;
+  const k = await crypto.subtle.importKey('raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return crypto.subtle.sign('HMAC', k, new TextEncoder().encode(msg));
 }
-function hmacHex(key: CryptoJS.lib.WordArray, msg: string) { return hmac(key, msg).toString(); }
-function getSignatureKey(key: string, date: string, region: string, service: string) {
-  return hmac(hmac(hmac(hmac(`AWS4${key}`, date), region), service), 'aws4_request');
+
+async function hmacHex(key: ArrayBuffer, msg: string): Promise<string> {
+  const buf = await hmacRaw(key, msg);
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
-function formatDate(d: Date)     { return d.toISOString().slice(0, 10).replace(/-/g, ''); }
-function formatDateTime(d: Date) { return d.toISOString().slice(0, 19).replace(/[-:]/g, '') + 'Z'; }
+
+async function getSignatureKey(sk: string, date: string, region: string, service: string): Promise<ArrayBuffer> {
+  const k1 = await hmacRaw(`AWS4${sk}`, date);
+  const k2 = await hmacRaw(k1, region);
+  const k3 = await hmacRaw(k2, service);
+  return hmacRaw(k3, 'aws4_request');
+}
