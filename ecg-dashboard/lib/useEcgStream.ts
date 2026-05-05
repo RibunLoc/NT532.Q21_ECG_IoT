@@ -119,10 +119,16 @@ export function useEcgStream() {
     try {
       const session     = await fetchAuthSession();
       const credentials = session.credentials;
-      if (!credentials) throw new Error('No credentials');
+      console.log('[MQTT] session tokens:', session.tokens ? 'OK' : 'MISSING');
+      console.log('[MQTT] identityId:', (session as {identityId?: string}).identityId ?? 'not in session — check below');
+      console.log('[MQTT] credentials:', credentials
+        ? `accessKeyId=${credentials.accessKeyId?.slice(0,8)}... sessionToken=${credentials.sessionToken ? 'present' : 'MISSING'}`
+        : 'NULL — Identity Pool chưa cấp credentials');
+      if (!credentials) throw new Error('No credentials from Identity Pool');
 
       const { accessKeyId, secretAccessKey, sessionToken } = credentials;
       const url = buildWssUrl(IOT_ENDPOINT, AWS_REGION, accessKeyId, secretAccessKey, sessionToken!);
+      console.log('[MQTT] connecting to:', url.slice(0, 80) + '...');
 
       const client = mqtt.connect(url, {
         protocolVersion: 4,
@@ -131,6 +137,7 @@ export function useEcgStream() {
       });
 
       client.on('connect', () => {
+        console.log('[MQTT] WebSocket connected to AWS IoT!');
         client.subscribe(['ecg/result', 'ecg/raw', 'ecg/alert'], { qos: 1 });
         setState(s => ({ ...s, connected: true }));
       });
@@ -138,12 +145,14 @@ export function useEcgStream() {
       // Truyền payload thô vào handler — không parse ở đây để tránh stale closure
       client.on('message', (topic, payload) => handleMessage(topic, payload));
 
-      client.on('close', () => setState(s => ({ ...s, connected: false })));
-      client.on('error',  (err) => console.error('[MQTT]', err));
+      client.on('close',     ()    => { console.warn('[MQTT] connection closed'); setState(s => ({ ...s, connected: false })); });
+      client.on('error',     (err) => console.error('[MQTT] error:', err));
+      client.on('offline',   ()    => console.warn('[MQTT] client offline'));
+      client.on('reconnect', ()    => console.log('[MQTT] reconnecting...'));
 
       clientRef.current = client;
     } catch (err) {
-      console.error('[useEcgStream] connect error:', err);
+      console.error('[useEcgStream] FATAL connect error:', err);
     }
   }, [handleMessage]);
 
