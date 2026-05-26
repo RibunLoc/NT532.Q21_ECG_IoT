@@ -3,6 +3,7 @@ import { useEcgStream } from '@/lib/useEcgStream';
 import EcgWaveform from '@/components/EcgWaveform';
 import ClassBadge from '@/components/ClassBadge';
 import ProbBar from '@/components/ProbBar';
+import { TriangleAlert } from 'lucide-react';
 
 export default function DashboardPage() {
   const { lastResult, lastAlert, waveform, connected, deviceOnline, bpm } = useEcgStream();
@@ -12,81 +13,91 @@ export default function DashboardPage() {
   const probs = lastResult?.probs ?? [1, 0, 0, 0, 0];
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="max-w-4xl mx-auto space-y-5">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-end justify-between">
         <div>
-          <h1 className="text-xl font-bold">Dashboard realtime</h1>
-          <p className="text-sm text-gray-500">ecg-device-001</p>
+          <h1 className="text-lg font-semibold tracking-tight">Dashboard</h1>
+          <p className="text-sm text-muted mt-0.5">ecg-device-001 · realtime</p>
         </div>
-        <div className="flex items-center gap-3">
-          {/* AWS WebSocket */}
-          <div className="flex items-center gap-1">
-            <span className={`w-2 h-2 rounded-full ${connected ? 'bg-blue-400' : 'bg-gray-600'}`} />
-            <span className="text-xs text-gray-500">AWS</span>
-          </div>
-          {/* ESP32 device */}
-          <div className="flex items-center gap-1">
-            <span className={`w-2 h-2 rounded-full ${deviceOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-            <span className="text-xs text-gray-400">{deviceOnline ? 'Thiết bị online' : 'Thiết bị offline'}</span>
-          </div>
+        <div className="flex items-center gap-4">
+          <StatusDot ok={connected} label="AWS" />
+          <StatusDot ok={deviceOnline} label={deviceOnline ? 'Thiết bị online' : 'Thiết bị offline'} pulse={deviceOnline} />
         </div>
       </div>
 
-      {/* Alert banner */}
+      {/* Alert banner — chỉ chỗ này dùng đỏ */}
       {lastAlert && (
-        <div className="bg-red-900/30 border border-red-700 rounded-lg p-4">
-          <p className="text-sm font-semibold text-red-300">
-            ⚠️ Cảnh báo xác nhận kép — {lastAlert.cloud_label}
-          </p>
-          <p className="text-xs text-red-400 mt-1">
-            Edge: {lastAlert.edge_label} ({Math.round(lastAlert.edge_confidence * 100)}%) ·
-            Cloud: {lastAlert.cloud_label} ({Math.round(lastAlert.cloud_confidence * 100)}%) ·
-            {lastAlert.iso_timestamp}
-          </p>
+        <div className="flex items-start gap-3 bg-danger/5 border border-danger/20 rounded-lg p-4">
+          <TriangleAlert className="w-4 h-4 text-danger mt-0.5 shrink-0" strokeWidth={2} />
+          <div>
+            <p className="text-sm font-medium text-danger">
+              Cảnh báo xác nhận kép — {lastAlert.cloud_label}
+            </p>
+            <p className="text-xs text-danger/70 mt-1 tabular-nums">
+              Edge: {lastAlert.edge_label} ({Math.round(lastAlert.edge_confidence * 100)}%) ·
+              Cloud: {lastAlert.cloud_label} ({Math.round(lastAlert.cloud_confidence * 100)}%) ·
+              {lastAlert.iso_timestamp}
+            </p>
+          </div>
         </div>
       )}
 
       {/* Metric cards */}
       <div className="grid grid-cols-3 gap-4">
-        <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
-          <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Nhịp tim</p>
-          <p className="text-3xl font-bold text-white">{bpm ?? '—'}</p>
-          <p className="text-xs text-gray-500 mt-1">BPM</p>
-        </div>
-        <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
-          <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Phân loại</p>
-          <ClassBadge label={label} />
-          <p className="text-xs text-gray-500 mt-2">Độ tin cậy: {conf}%</p>
-        </div>
-        <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
-          <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Trạng thái</p>
-          <p className="text-sm font-semibold text-white">
-            {lastResult?.leads_on === false ? '⚡ Mất điện cực' : '✅ Tín hiệu OK'}
+        <Card label="Nhịp tim">
+          <p className="text-3xl font-semibold tabular-nums tracking-tight">{bpm ?? '—'}</p>
+          <p className="text-xs text-faint mt-1">BPM</p>
+        </Card>
+        <Card label="Phân loại">
+          <div className="mt-0.5"><ClassBadge label={label} /></div>
+          <p className="text-xs text-faint mt-2">Độ tin cậy {conf}%</p>
+        </Card>
+        <Card label="Trạng thái">
+          <p className="text-sm font-medium">
+            {lastResult?.leads_on === false ? 'Mất điện cực' : 'Tín hiệu ổn định'}
           </p>
-          <p className="text-xs text-gray-500 mt-1">
-            {lastResult?.needs_cloud_check ? '☁️ Gửi cloud kiểm tra' : '✓ Edge xác nhận'}
+          <p className="text-xs text-faint mt-1">
+            {lastResult?.needs_cloud_check ? 'Đang gửi cloud kiểm tra' : 'Edge xác nhận'}
           </p>
-        </div>
+        </Card>
       </div>
 
       {/* ECG Waveform */}
-      <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
-        <p className="text-xs text-gray-500 uppercase tracking-wider mb-3">Sóng ECG realtime</p>
-        {waveform.length > 10
-          ? <EcgWaveform samples={waveform} label={label} />
-          : <div className="h-40 flex items-center justify-center text-gray-600 text-sm">
-              Đang chờ tín hiệu từ thiết bị...
-            </div>
-        }
-      </div>
+      <Card label="Sóng ECG realtime">
+        <div className="mt-2">
+          {waveform.length > 10
+            ? <EcgWaveform samples={waveform} label={label} />
+            : <div className="h-40 flex items-center justify-center text-faint text-sm border border-border rounded-lg bg-zinc-50">
+                Đang chờ tín hiệu từ thiết bị…
+              </div>
+          }
+        </div>
+      </Card>
 
       {/* Probability bars */}
-      <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
-        <p className="text-xs text-gray-500 uppercase tracking-wider mb-4">Xác suất phân loại (Edge)</p>
-        <ProbBar probs={probs} />
-      </div>
+      <Card label="Xác suất phân loại (Edge)">
+        <div className="mt-3"><ProbBar probs={probs} /></div>
+      </Card>
+    </div>
+  );
+}
 
+/* ── Sub-components ────────────────────────────────────── */
+function Card({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="bg-surface rounded-lg p-4 border border-border">
+      <p className="text-xs text-faint mb-1">{label}</p>
+      {children}
+    </div>
+  );
+}
+
+function StatusDot({ ok, label, pulse }: { ok: boolean; label: string; pulse?: boolean }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className={`w-1.5 h-1.5 rounded-full ${ok ? 'bg-foreground' : 'bg-faint'} ${pulse ? 'animate-pulse' : ''}`} />
+      <span className="text-xs text-muted">{label}</span>
     </div>
   );
 }

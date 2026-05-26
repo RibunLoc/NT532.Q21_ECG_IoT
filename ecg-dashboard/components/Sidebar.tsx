@@ -2,39 +2,40 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { signOut } from 'aws-amplify/auth';
+import { LayoutDashboard, LineChart, Bell, Settings, LogOut, Activity } from 'lucide-react';
 
 const NAV = [
-  { href: '/',         label: 'Dashboard',     icon: '📊' },
-  { href: '/history',  label: 'Lịch sử',       icon: '📈' },
-  { href: '/alerts',   label: 'Cảnh báo',      icon: '🔔' },
-  // { href: '/report',   label: 'Báo cáo AI',    icon: '🤖' },
-  { href: '/settings', label: 'Cài đặt',       icon: '⚙️' },
+  { href: '/',         label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/history',  label: 'Lịch sử',   icon: LineChart },
+  { href: '/alerts',   label: 'Cảnh báo',  icon: Bell },
+  { href: '/settings', label: 'Cài đặt',   icon: Settings },
 ];
 
 export default function Sidebar() {
   const path = usePathname();
   return (
-    <aside className="w-56 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col">
+    <aside className="w-56 shrink-0 bg-surface border-r border-border flex flex-col">
       {/* Logo */}
-      <div className="px-4 py-5 border-b border-gray-800">
-        <p className="text-sm font-bold text-white">❤️ ECG Monitor</p>
-        <p className="text-xs text-gray-500 mt-0.5">IoT Monitoring System</p>
+      <div className="px-5 h-16 flex items-center gap-2 border-b border-border">
+        <Activity className="w-4 h-4 text-foreground" strokeWidth={2} />
+        <span className="text-sm font-semibold tracking-tight">ECG Monitor</span>
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 px-2 py-4 space-y-1">
+      <nav className="flex-1 px-3 py-4 space-y-0.5">
         {NAV.map(n => {
           const active = path === n.href;
+          const Icon = n.icon;
           return (
             <Link
               key={n.href}
               href={n.href}
-              className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors
+              className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors
                 ${active
-                  ? 'bg-red-900/40 text-red-300 font-medium'
-                  : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'}`}
+                  ? 'bg-zinc-100 text-foreground font-medium'
+                  : 'text-muted hover:text-foreground hover:bg-zinc-50'}`}
             >
-              <span>{n.icon}</span>
+              <Icon className="w-4 h-4 shrink-0" strokeWidth={1.75} />
               {n.label}
             </Link>
           );
@@ -42,13 +43,14 @@ export default function Sidebar() {
       </nav>
 
       {/* Sign out */}
-      <div className="px-2 pb-4">
+      <div className="px-3 pb-4">
         <button
           onClick={() => signOut()}
-          className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm
-                     text-gray-500 hover:bg-gray-800 hover:text-gray-300 transition-colors"
+          className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm
+                     text-faint hover:text-foreground hover:bg-zinc-50 transition-colors"
         >
-          <span>🚪</span> Đăng xuất
+          <LogOut className="w-4 h-4 shrink-0" strokeWidth={1.75} />
+          Đăng xuất
         </button>
       </div>
     </aside>

@@ -15,7 +15,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="vi" className={`${geistSans.variable} ${geistMono.variable} h-full`}>
-      <body className="bg-gray-950 text-gray-100 antialiased h-full" suppressHydrationWarning>
+      <body className="bg-background text-foreground antialiased h-full" suppressHydrationWarning>
         <AmplifyProvider>
           <div className="flex h-screen overflow-hidden">
             <Sidebar />
