@@ -4,7 +4,7 @@
 #define WIFI_SSID "ThaoNhi T2"
 #define WIFI_PASSWORD "31121997"
 
-#define MQTT_BROKER  "192.168.1.15"
+#define MQTT_BROKER  "192.168.1.7"
 #define MQTT_PORT 1883
 #define MQTT_CLIENT "ecg-device-001" // Phải khớp trên cloud Dynamodb
 
@@ -29,6 +29,6 @@
 // ── DEMO MODE — test khi chưa có AD8232 ──
 // 1: bỏ qua check leads_off + dùng fake ECG signal
 // 0: dùng AD8232 thật
-#define DEMO_MODE 1
+#define DEMO_MODE 0
 
 #endif

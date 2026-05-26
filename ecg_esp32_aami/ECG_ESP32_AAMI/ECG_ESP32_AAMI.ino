@@ -15,6 +15,9 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <string.h>           // memmove, memcpy
+#include <time.h>
+#include "soc/soc.h"           // tắt brownout detector
+#include "soc/rtc_cntl_reg.h"
 
 #include "config.h"
 #include "ecg_weights_aami.h"
@@ -22,6 +25,12 @@
 #include "r_peak_detector.h"
 #include "inference.h"
 #include "oled_display.h"
+
+// ── MAX30102 (SpO2/HR). Đặt 0 để tắt khi debug. ──
+#define ENABLE_MAX30102 0
+#if ENABLE_MAX30102
+#include "max30102_sensor.h"
+#endif
 
 #if DEMO_MODE
 #include "fake_ecg.h"
@@ -36,9 +45,15 @@ static const char* oled_label = "---";
 static float       oled_conf  = 0.0f;
 static int         oled_bpm   = 0;
 
+// SpO2 + HR từ MAX30102 (cập nhật ~1 lần/giây qua max30102Poll)
+static int  oled_spo2  = 0;
+static int  oled_hr_ppg = 0;
+static bool spo2_valid  = false;
+
 // Refresh OLED mỗi ~100ms độc lập với sampling rate
 static unsigned long last_oled_ms = 0;
-const unsigned long OLED_REFRESH_MS = 100;
+const unsigned long OLED_REFRESH_MS = 40;   // 25 fps — sóng trôi mượt
+// (100ms → mỗi lần vẽ nhảy ~36 cột/giật; 40ms → ~14 cột, đều hơn)
 
 // Sliding buffer: sau moi inference, shift 270 samples cuoi len dau
 static float  ecg_buffer[BUFFER_SIZE];        // 540 floats
@@ -53,22 +68,53 @@ const unsigned long LEADS_OFF_INTERVAL_MS = 1000;   // 1 lan/giay
 
 // ── Network Setup ───────────────────────────────────────
 void connectWiFi() {
-    Serial.printf("Connecting WiFi: %s", WIFI_SSID);
+    Serial.printf("Connecting WiFi: %s\n", WIFI_SSID);
+    Serial.println(">> wifi: mode STA");
+    WiFi.persistent(false);     // không ghi config WiFi vào flash mỗi lần
+    WiFi.mode(WIFI_STA);
+    Serial.println(">> wifi: disconnect+reset radio");
+    WiFi.disconnect(true);      // reset radio sạch
+    delay(100);
+    Serial.println(">> wifi: begin()");
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500); Serial.print(".");
+    Serial.println(">> wifi: begin() returned, waiting...");
+
+    // Timeout 20s thay vì kẹt vĩnh viễn. In trạng thái để chẩn đoán.
+    unsigned long t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) {
+        delay(500);
+        Serial.printf(".(status=%d)", WiFi.status());
     }
-    Serial.printf("\n WiFi OK! IP: %s\n", WiFi.localIP().toString().c_str());
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("\n WiFi OK! IP: %s  RSSI: %d dBm\n",
+            WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    } else {
+        // Không nối được — KHÔNG kẹt, vẫn chạy tiếp (chế độ offline).
+        // status: 1=NO_SSID(không thấy mạng/5GHz), 4=CONNECT_FAILED(sai pass), 6=DISCONNECTED
+        Serial.printf("\n[WiFi] FAIL status=%d — chay offline (OLED/ECG van chay, khong MQTT)\n",
+            WiFi.status());
+    }
 }
 
 void connectMQTT() {
     while (!mqtt.connected()) {
         Serial.print("Connecting MQTT...");
-        if (mqtt.connect(MQTT_CLIENT)) {
+        // Chạy hoạt ảnh trong lúc chờ connect
+        unsigned long t0 = millis();
+        bool connected = false;
+        while (millis() - t0 < 3000) {
+            oledMqttConnecting();
+            if (mqtt.connect(MQTT_CLIENT)) {
+                connected = true;
+                break;
+            }
+        }
+        if (connected) {
             Serial.println(" OK!");
+            oledMqttOK();
         } else {
-            Serial.printf(" rc=%d, retry 3s\n", mqtt.state());
-            delay(3000);
+            Serial.printf(" rc=%d, retry\n", mqtt.state());
         }
     }
 }
@@ -76,7 +122,9 @@ void connectMQTT() {
 // ── Publishing ──────────────────────────────────────────
 void publishResult(const InferenceResult& r, bool needs_cloud_check) {
     // Đủ chỗ cho 5 probs + 47 samples downsampled (~600B)
-    StaticJsonDocument<768> doc;
+    // static: tránh chiếm stack loopTask (xem chú thích publishRaw).
+    static StaticJsonDocument<768> doc;
+    doc.clear();
     doc["device_id"]        = MQTT_CLIENT;
     doc["timestamp"]        = millis();
     doc["label"]            = r.label_name;
@@ -84,6 +132,10 @@ void publishResult(const InferenceResult& r, bool needs_cloud_check) {
     doc["confidence"]       = r.confidence;
     doc["leads_on"]         = leads_on;
     doc["needs_cloud_check"]= needs_cloud_check;
+
+    // SpO2 + HR từ MAX30102 (0 nếu chưa đặt ngón tay / chưa hợp lệ)
+    doc["spo2"]             = oled_spo2;
+    doc["hr_ppg"]           = oled_hr_ppg;
 
     JsonArray probs = doc.createNestedArray("probs");
     for (int i = 0; i < 5; i++) probs.add(r.all_probs[i]);
@@ -93,7 +145,9 @@ void publishResult(const InferenceResult& r, bool needs_cloud_check) {
     JsonArray wave = doc.createNestedArray("samples");
     for (int i = 0; i < SAMPLE_COUNT; i += 4) wave.add(beat_window[i]);
 
-    char buf[768];
+    // static: đưa buffer 768B khỏi stack loopTask (8KB) — tránh tràn stack
+    // đè lên global (vd wifiClient) → crash LoadProhibited ở mqtt.connected().
+    static char buf[768];
     size_t n = serializeJson(doc, buf);
     mqtt.publish(TOPIC_RESULT, buf, n);
 
@@ -102,14 +156,20 @@ void publishResult(const InferenceResult& r, bool needs_cloud_check) {
 }
 
 void publishRaw(const float* window) {
-    StaticJsonDocument<2048> doc;
+    // static: doc 2KB + buf 2KB = 4KB — KHÔNG để trên stack loopTask (8KB),
+    // cộng CNN/MAX30102 dễ tràn stack → đè wifiClient global → crash
+    // LoadProhibited ở mqtt.connected(). Đây là nguyên nhân crash chính.
+    static StaticJsonDocument<2048> doc;
+    doc.clear();
     doc["device_id"] = MQTT_CLIENT;
     doc["timestamp"] = millis();
+    doc["spo2"]      = oled_spo2;
+    doc["hr_ppg"]    = oled_hr_ppg;
 
     JsonArray arr = doc.createNestedArray("samples");
     for (int i = 0; i < SAMPLE_COUNT; i++) arr.add(window[i]);
 
-    char buf[2048];
+    static char buf[2048];
     size_t n = serializeJson(doc, buf);
     mqtt.publish(TOPIC_RAW, buf, n);
     Serial.printf("[MQTT->] raw waveform (%d bytes)\n", (int)n);
@@ -175,6 +235,11 @@ void process_beat() {
 
 // ── Setup ───────────────────────────────────────────────
 void setup() {
+    // Tắt brownout detector: code reset lặp ở connectWiFi do sụt áp khi WiFi
+    // bật (dòng vọt ~300mA). Tắt để ESP không tự reset vì dip điện áp ngắn.
+    // LƯU Ý: đây là giảm nhẹ triệu chứng — vẫn nên cấp nguồn 5V đủ mạnh.
+    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+
     Serial.begin(115200);
     delay(500);
     Serial.println("\n=== ECG ESP32 AAMI Edge Inference ===");
@@ -182,23 +247,53 @@ void setup() {
     pinMode(LO_PLUS,  INPUT);
     pinMode(LO_MINUS, INPUT);
 
+    Serial.println(">> step: setupOLED");
     setupOLED();   // Khởi tạo OLED trước khi kết nối WiFi (hiện boot screen)
+#if ENABLE_MAX30102
+    Serial.println(">> step: setupMAX30102");
+    setupMAX30102();  // SpO2/HR — chung I2C bus với OLED, gọi SAU setupOLED()
+#endif
 
+    Serial.println(">> step: connectWiFi");
     connectWiFi();
+    Serial.println(">> step: oledWifiOK");
+    oledWifiOK(WiFi.localIP().toString().c_str());
+    configTime(7 * 3600, 0, "pool.ntp.org", "time.google.com");
     mqtt.setServer(MQTT_BROKER, MQTT_PORT);
     mqtt.setBufferSize(2048);   // du cho payload raw
+    Serial.println(">> step: connectMQTT");
     connectMQTT();
 
+    Serial.println(">> step: setupInference");
     setupInference();
 
-    Serial.println("Bat dau thu tin hieu ECG...\n");
+    Serial.println(">> step: setup DONE — bat dau thu tin hieu ECG\n");
 }
 
 // ── Main Loop ───────────────────────────────────────────
 void loop() {
-    // Giu MQTT connection
+    // Giu WiFi TRUOC mqtt: neu WiFi rot ma goi mqtt.connected() thi
+    // PubSubClient doc con tro WiFiClient da hong -> LoadProhibited crash.
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[WiFi] mat ket noi, reconnect...");
+        WiFi.disconnect();
+        WiFi.reconnect();
+        unsigned long t0 = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - t0 < 5000) {
+            delay(200);
+        }
+        return;   // bo qua vong nay, lan sau WiFi on roi moi cham mqtt
+    }
+
+    // Giu MQTT connection (chi goi khi WiFi da on)
     if (!mqtt.connected()) connectMQTT();
     mqtt.loop();
+
+#if ENABLE_MAX30102
+    // Poll MAX30102 non-blocking mỗi vòng (vài chục µs, không phá 360Hz ECG)
+    max30102Poll();
+    readSpO2HR(oled_spo2, oled_hr_ppg, spo2_valid);
+#endif
 
 #if DEMO_MODE
     // ── DEMO MODE: bypass leads check + dung fake ECG ──
@@ -218,10 +313,13 @@ void loop() {
             last_leads_off_publish = now;
         }
         if (now - last_oled_ms >= OLED_REFRESH_MS) {
-            oledDraw(oled_label, oled_conf, false, 0);
+            oledDraw(oled_label, oled_conf, false, 0, oled_spo2);
             last_oled_ms = now;
         }
-        delay(100);
+        // Không delay(100): loop phải chạy nhanh để hút FIFO MAX30102 (max 32
+        // mẫu) kịp, nếu không FIFO tràn → mất mẫu → SpO2 không tính được.
+        // delay nhỏ ~3ms cho gần sample rate 100Hz của MAX30102.
+        delay(3);
         return;
     }
 
@@ -244,10 +342,14 @@ void loop() {
     // Refresh OLED mỗi 100ms (không block sampling)
     unsigned long now_ms = millis();
     if (now_ms - last_oled_ms >= OLED_REFRESH_MS) {
-        oledDraw(oled_label, oled_conf, leads_on, oled_bpm);
+        oledDraw(oled_label, oled_conf, leads_on, oled_bpm, oled_spo2);
         last_oled_ms = now_ms;
     }
 
-    // Sampling rate 360 Hz → moi sample cach nhau 2778 us
+    // Sampling rate 360 Hz → moi sample cach nhau 2778 us.
+    // delayMicroseconds() là busy-wait, KHÔNG nhả CPU cho RTOS → nếu loop chỉ
+    // dùng nó (nhánh leads-on) thì loopTask watchdog không được feed → sau
+    // vài giây ESP32 panic restart. yield() nhả CPU 1 nhịp để feed watchdog.
+    yield();
     delayMicroseconds(SAMPLE_INTERVAL_US);
 }

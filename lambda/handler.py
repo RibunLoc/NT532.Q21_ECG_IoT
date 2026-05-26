@@ -67,9 +67,14 @@ def lambda_handler(event, _context):
         # Ưu tiên server_time, fallback về time.time() nếu không có
         raw_ts = event.get('server_time') or event.get('timestamp', 0)
         ts = int(raw_ts / 1000) if raw_ts > 1_000_000_000_000 else int(raw_ts) or int(time.time())
-        edge_label = event.get('edge_label', 'unknown')
-        edge_conf  = float(event.get('edge_confidence', 0.0))
+        # ESP32 gửi 'label'+'confidence', gateway/cloud dùng 'edge_label'+'edge_confidence'
+        edge_label = event.get('edge_label') or event.get('label', 'unknown')
+        edge_conf  = float(event.get('edge_confidence') or event.get('confidence', 0.0))
         samples    = event['samples']
+
+        # SpO2 + HR từ MAX30102 (0 nếu chưa đặt ngón tay / device cũ không gửi)
+        spo2   = int(event.get('spo2', 0) or 0)
+        hr_ppg = int(event.get('hr_ppg', 0) or 0)
 
         if len(samples) != 187:
             return {'status': 'error', 'msg': f'expected 187 samples, got {len(samples)}'}
@@ -103,6 +108,8 @@ def lambda_handler(event, _context):
             'cloud_label':      cloud_label,
             'cloud_confidence': str(round(cloud_conf, 4)),
             'cloud_proba':      [str(round(float(p), 4)) for p in proba],
+            'spo2':             spo2,
+            'hr_ppg':           hr_ppg,
             'is_alert':         is_alert,
             'source':           'cloud-verified',
         })

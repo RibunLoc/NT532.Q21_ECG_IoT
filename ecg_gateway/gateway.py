@@ -22,20 +22,20 @@ CA_PATH  = "./certs/AmazonRootCA1.pem"
 
 # ── AWS IoT Client ───────────────────────────────────────
 def create_AWS_client():
-    client = mqtt.Client(client_id=AWS_CLIENT_ID)
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=AWS_CLIENT_ID)
 
     ssl_ctx = ssl.create_default_context()
     ssl_ctx.load_verify_locations(CA_PATH)
     ssl_ctx.load_cert_chain(certfile=CERT_PATH, keyfile=KEY_PATH)
     client.tls_set_context(ssl_ctx)
 
-    def on_connect(client, userdata, flags, rc):
-        if rc == 0:
+    def on_connect(client, userdata, flags, reason_code, properties):
+        if reason_code == 0:
             print("✅ Kết nối AWS IoT Core thành công!")
         else:
-            print(f"❌ Lỗi kết nối AWS: rc={rc}")
+            print(f"❌ Lỗi kết nối AWS: rc={reason_code}")
 
-    def on_publish(client, userdata, mid):
+    def on_publish(client, userdata, mid, reason_code, properties):
         print(f"   ↑ Đã gửi lên AWS (mid={mid})")
 
     client.on_connect = on_connect
@@ -46,13 +46,13 @@ def create_AWS_client():
 # ── Local MQTT Client (nhận từ ESP32) ───────────────────
 def create_local_client(aws_client):
 
-    def on_connect(client, userdata, flags, rc):
-        if rc == 0:
+    def on_connect(client, userdata, flags, reason_code, properties):
+        if reason_code == 0:
             print("✅ Local broker sẵn sàng nhận từ ESP32!")
             client.subscribe(LOCAL_TOPICS)
             print(f"   Đang lắng nghe topics: {[t[0] for t in LOCAL_TOPICS]}")
         else:
-            print(f"❌ Lỗi local broker: rc={rc}")
+            print(f"❌ Lỗi local broker: rc={reason_code}")
 
     def on_message(client, userdata, msg):
         topic   = msg.topic
@@ -70,10 +70,10 @@ def create_local_client(aws_client):
         print(f"\n[LOCAL ←] Topic: {topic}")
         aws_client.publish(topic, payload, qos=1)
 
-    def on_disconnect(client, userdata, rc):
-        print(f"⚠️ Local broker mất kết nối (rc={rc}), đang reconnect...")
+    def on_disconnect(client, userdata, flags, reason_code, properties):
+        print(f"⚠️ Local broker mất kết nối (rc={reason_code}), đang reconnect...")
 
-    client = mqtt.Client(client_id="ECG_Local_Broker")
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="ECG_Local_Broker")
     client.on_connect    = on_connect
     client.on_message    = on_message
     client.on_disconnect = on_disconnect

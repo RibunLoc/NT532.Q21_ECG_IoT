@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"/c/Users/LOC/AppData/Local/Arduino15/packages/esp32/tools/esp-x32/2601/bin/xtensa-esp32-elf-addr2line.exe\" -pfiaC -e \"C:\\\\Users\\\\LOC\\\\AppData\\\\Local\\\\arduino\\\\sketches\\\\020BD45DD7559FF827336658711A74FE\\\\ECG_ESP32_AAMI.ino.elf\" 0x4016defe 0x400d494f 0x400df664 0x4008d721)"
+    ]
+  }
+}
