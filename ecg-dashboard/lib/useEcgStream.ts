@@ -34,9 +34,23 @@ export interface EcgRaw {
   samples:   number[];
 }
 
+export interface EcgVerified {
+  device_id:        string;
+  timestamp:        number;
+  iso_timestamp:    string;
+  edge_label:       string;
+  edge_confidence:  number;
+  cloud_label:      string;
+  cloud_confidence: number;
+  agrees:           boolean;
+  is_alert:         boolean;
+}
+
 interface EcgStreamState {
   lastResult:   EcgResult | null;
   lastAlert:    EcgAlert  | null;
+  lastVerified: EcgVerified | null;
+  verifiedAt:   number;
   waveform:     number[];
   connected:    boolean;
   deviceOnline: boolean;
@@ -56,6 +70,8 @@ export function useEcgStream() {
   const [state, setState] = useState<EcgStreamState>({
     lastResult:   null,
     lastAlert:    null,
+    lastVerified: null,
+    verifiedAt:   0,
     waveform:     [],
     connected:    false,
     deviceOnline: false,
@@ -102,6 +118,10 @@ export function useEcgStream() {
     if (topic === 'ecg/alert') {
       setState(s => ({ ...s, lastAlert: data as EcgAlert }));
     }
+
+    if (topic === 'ecg/verified') {
+      setState(s => ({ ...s, lastVerified: data as EcgVerified, verifiedAt: now }));
+    }
   }, []);
 
   const connect = useCallback(async () => {
@@ -136,7 +156,7 @@ export function useEcgStream() {
       });
 
       client.on('connect', () => {
-        client.subscribe(['ecg/result', 'ecg/raw', 'ecg/alert'], { qos: 1 });
+        client.subscribe(['ecg/result', 'ecg/raw', 'ecg/alert', 'ecg/verified'], { qos: 1 });
         setState(s => ({ ...s, connected: true }));
         connectingRef.current = false;
       });

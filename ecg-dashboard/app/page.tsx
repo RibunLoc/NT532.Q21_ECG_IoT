@@ -12,7 +12,16 @@ const BPM_HISTORY_MAX = 60;
 const CLASS_ORDER = ['Normal', 'Supraventricular', 'Ventricular', 'Fusion', 'Unknown'];
 
 export default function DashboardPage() {
-  const { lastResult, lastAlert, waveform, connected, deviceOnline, bpm } = useEcgStream();
+  const { lastResult, lastAlert, lastVerified, verifiedAt, waveform, connected, deviceOnline, bpm } = useEcgStream();
+
+  // Tinh thoi gian cloud verify gan nhat
+  const [secAgo, setSecAgo] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => {
+      setSecAgo(verifiedAt ? Math.round((Date.now() - verifiedAt) / 1000) : 0);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [verifiedAt]);
 
   const label = lastResult?.label ?? 'Normal';
   const conf  = lastResult ? Math.round(lastResult.confidence * 100) : 0;
@@ -87,13 +96,26 @@ export default function DashboardPage() {
           <div className="mt-0.5"><ClassBadge label={label} /></div>
           <p className="text-xs text-faint mt-2">Độ tin cậy {conf}%</p>
         </Card>
-        <Card label="Trạng thái">
-          <p className="text-sm font-medium">
-            {lastResult?.leads_on === false ? 'Mất điện cực' : 'Tín hiệu ổn định'}
-          </p>
-          <p className="text-xs text-faint mt-1">
-            {lastResult?.needs_cloud_check ? 'Đang gửi cloud kiểm tra' : 'Edge xác nhận'}
-          </p>
+        <Card label="Cloud verify">
+          {lastVerified ? (
+            <>
+              <p className="text-sm font-medium" style={{ color: lastVerified.agrees ? '#16a34a' : '#dc2626' }}>
+                {lastVerified.cloud_label}
+                {lastVerified.agrees ? ' ✓ khớp edge' : ' ✗ khác edge'}
+              </p>
+              <p className="text-xs text-faint mt-1 tabular-nums">
+                conf {Math.round(lastVerified.cloud_confidence * 100)}% · {secAgo}s trước
+                {lastVerified.is_alert && <span className="text-danger font-medium ml-1">· ALERT</span>}
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-medium text-faint">Chờ cloud verify</p>
+              <p className="text-xs text-faint mt-1">
+                {lastResult?.needs_cloud_check ? 'Đang gửi…' : 'Chưa có nhịp bất thường'}
+              </p>
+            </>
+          )}
         </Card>
       </div>
 
