@@ -12,21 +12,24 @@ export async function GET(req: NextRequest) {
   const limit     = parseInt(searchParams.get('limit') ?? '50');
 
   try {
-    // Query by device_id (partition key), sort by timestamp descending
+    // Query by device_id, sort by timestamp descending.
+    // LUU Y: DynamoDB Limit ap dung TRUOC FilterExpression -> neu chi
+    // alertOnly, can quet nhieu hon (Limit lon) de filter ra du item.
+    // Voi alert: quet toi 500 item gan nhat, filter is_alert=true, lay 'limit' dau.
+    const scanLimit = alertOnly ? 500 : limit;
     const cmd = new QueryCommand({
       TableName:                TABLE,
       KeyConditionExpression:   'device_id = :d',
-      ExpressionAttributeValues: { ':d': { S: device } },
+      ExpressionAttributeValues: alertOnly
+        ? { ':d': { S: device }, ':t': { BOOL: true } }
+        : { ':d': { S: device } },
       ScanIndexForward:         false,
-      Limit:                    limit,
-      ...(alertOnly && {
-        FilterExpression:            'is_alert = :t',
-        ExpressionAttributeValues:   { ':d': { S: device }, ':t': { BOOL: true } },
-      }),
+      Limit:                    scanLimit,
+      ...(alertOnly && { FilterExpression: 'is_alert = :t' }),
     });
 
     const result = await ddb.send(cmd);
-    const items  = (result.Items ?? []).map(i => unmarshall(i));
+    const items  = (result.Items ?? []).map(i => unmarshall(i)).slice(0, limit);
     return NextResponse.json({ items });
   } catch (err) {
     console.error('[api/events]', err);
