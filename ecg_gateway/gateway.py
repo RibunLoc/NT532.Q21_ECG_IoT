@@ -7,8 +7,8 @@ import paho.mqtt.client as mqtt
 LOCAL_BROKER = "127.0.0.1"
 LOCAL_PORT = 1883
 LOCAL_TOPICS = [
-    ("ecg/result", 0),
-    ("ecg/raw", 0)
+    ("ecg/result", 1),   # QoS 1: dữ liệu y tế — không để mất nhịp khi nghẽn
+    ("ecg/raw", 1)
 ]
 
 # ── Cấu hình AWS IoT Core ────────────────────────────────
@@ -31,9 +31,9 @@ def create_AWS_client():
 
     def on_connect(client, userdata, flags, reason_code, properties):
         if reason_code == 0:
-            print("✅ Kết nối AWS IoT Core thành công!")
+            print(" Kết nối AWS IoT Core thành công!")
         else:
-            print(f"❌ Lỗi kết nối AWS: rc={reason_code}")
+            print(f" Lỗi kết nối AWS: rc={reason_code}")
 
     def on_publish(client, userdata, mid, reason_code, properties):
         print(f"   ↑ Đã gửi lên AWS (mid={mid})")
@@ -48,30 +48,37 @@ def create_local_client(aws_client):
 
     def on_connect(client, userdata, flags, reason_code, properties):
         if reason_code == 0:
-            print("✅ Local broker sẵn sàng nhận từ ESP32!")
+            print(" Local broker sẵn sàng nhận từ ESP32!")
             client.subscribe(LOCAL_TOPICS)
             print(f"   Đang lắng nghe topics: {[t[0] for t in LOCAL_TOPICS]}")
         else:
-            print(f"❌ Lỗi local broker: rc={reason_code}")
+            print(f" Lỗi local broker: rc={reason_code}")
 
     def on_message(client, userdata, msg):
         topic   = msg.topic
         payload = msg.payload.decode('utf-8')
 
-        # Thêm server timestamp thật
-        import time, json
+        # Thêm server timestamp thật (ESP32 chỉ có millis() từ lúc boot)
         try:
             data = json.loads(payload)
             data['server_time'] = int(time.time() * 1000)  # Unix ms thật
             payload = json.dumps(data)
-        except:
-            pass
+        except Exception as e:
+            print(f"    payload không phải JSON, gửi nguyên: {e}")
 
         print(f"\n[LOCAL ←] Topic: {topic}")
-        aws_client.publish(topic, payload, qos=1)
+
+        # Forward lên AWS — kiểm kết nối trước, log rõ thành/bại
+        if not aws_client.is_connected():
+            print("    AWS mất kết nối — message sẽ vào queue (QoS 1), chờ reconnect")
+        info = aws_client.publish(topic, payload, qos=1)
+        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            print(f"    Forward AWS lỗi: rc={info.rc}")
+        else:
+            print(f"   ↑ Forward AWS OK (mid={info.mid})")
 
     def on_disconnect(client, userdata, flags, reason_code, properties):
-        print(f"⚠️ Local broker mất kết nối (rc={reason_code}), đang reconnect...")
+        print(f" Local broker mất kết nối (rc={reason_code}), đang reconnect...")
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="ECG_Local_Broker")
     client.on_connect    = on_connect
@@ -87,11 +94,11 @@ if __name__ == "__main__":
 
     # kết nôi AWS IoT Core
     aws = create_AWS_client()
-    print(f"⏳ Đang kết nối tới {AWS_ENPOINT}:{AWS_PORT} ...")
+    print(f" Đang kết nối tới {AWS_ENPOINT}:{AWS_PORT} ...")
     try:
         aws.connect_async(AWS_ENPOINT, AWS_PORT, keepalive=60)
     except Exception as e:
-        print(f"❌ Không thể connect AWS: {e}")
+        print(f" Không thể connect AWS: {e}")
         exit(1)
     aws.loop_start()
     for i in range(10):
@@ -100,7 +107,7 @@ if __name__ == "__main__":
         if aws.is_connected():
             break
     if not aws.is_connected():
-        print("❌ AWS connect timeout — kiểm tra cert, endpoint, hoặc firewall")
+        print(" AWS connect timeout — kiểm tra cert, endpoint, hoặc firewall")
         exit(1)
 
     local = create_local_client(aws)
@@ -111,8 +118,8 @@ if __name__ == "__main__":
     try:
         local.loop_forever()
     except KeyboardInterrupt:
-        print("\n⛔ Dừng gateway...")
+        print("\n Dừng gateway...")
         local.disconnect()
         aws.loop_stop()
         aws.disconnect()
-        print("✅ Đã dừng sạch sẽ.")
+        print("Đã dừng sạch sẽ.")

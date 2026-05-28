@@ -105,6 +105,12 @@ aws iam attach-role-policy \
 aws iam attach-role-policy \
   --role-name ecg-lambda-role \
   --policy-arn arn:aws:iam::aws:policy/AmazonSNSFullAccess
+
+# Quan trong: Lambda publish MQTT topic 'ecg/alert' (iot_data.publish trong
+# handler.py) nen can quyen iot:Publish. Khong co quyen nay → alert that bai.
+aws iam attach-role-policy \
+  --role-name ecg-lambda-role \
+  --policy-arn arn:aws:iam::aws:policy/AWSIoTDataAccess
 ```
 
 Lay Role ARN:
@@ -130,13 +136,20 @@ aws lambda create-function \
   --handler handler.lambda_handler \
   --timeout 30 \
   --memory-size 1024 \
-  --environment "Variables={DDB_TABLE=ecg-events,SNS_TOPIC_ARN=arn:aws:sns:ap-southeast-1:XXXXXX:ecg-alerts,VEB_THRESHOLD=0.4}" \
+  --environment "Variables={DDB_TABLE=ecg-events,ALERT_TOPIC=ecg/alert,VEB_THRESHOLD=0.3}" \
   --zip-file fileb://_tmp.zip
 
 rm _tmp.py _tmp.zip
 ```
 
 > Thay `XXXXXX` bang AWS account ID cua ban (lay tu Step 1 va 3).
+>
+> **Luu y env var (khop voi handler.py):**
+> - `ALERT_TOPIC=ecg/alert` — handler doc bien nay (KHONG phai SNS_TOPIC_ARN).
+>   Lambda KHONG goi SNS truc tiep, ma publish MQTT topic `ecg/alert` →
+>   IoT Rule rieng (Step 7b) moi trigger SNS.
+> - `VEB_THRESHOLD=0.3` — sau khi train model moi, 0.3 cho VEB sens 79.81% +
+>   PPV 81.72% (tot hon 0.4). Doi neu muon nhay/dac hieu hon.
 
 ---
 
@@ -226,8 +239,8 @@ aws iot create-topic-rule \
   --region ap-southeast-1 \
   --rule-name ecg_waveform_to_lambda \
   --topic-rule-payload "{
-    \"sql\": \"SELECT * FROM 'ecg/+/waveform'\",
-    \"description\": \"Forward ECG waveform to inference Lambda\",
+    \"sql\": \"SELECT * FROM 'ecg/raw'\",
+    \"description\": \"Forward ECG raw waveform to inference Lambda\",
     \"actions\": [{
       \"lambda\": {\"functionArn\": \"$LAMBDA_ARN\"}
     }],
@@ -251,11 +264,44 @@ aws lambda add-permission \
 
 ---
 
+## **Step 7b: Tao IoT Rule `ecg/alert` → SNS Email**
+
+> Lambda KHONG goi SNS truc tiep. Khi phat hien bat thuong, no publish MQTT
+> topic `ecg/alert`. Rule nay subscribe `ecg/alert` va day sang SNS → email.
+> THIEU rule nay thi se KHONG co email du Lambda chay dung.
+
+```bash
+SNS_ARN="arn:aws:sns:ap-southeast-1:XXXXXX:ecg-alerts"   # tu Step 1
+
+aws iot create-topic-rule \
+  --region ap-southeast-1 \
+  --rule-name ecg_alert_to_sns \
+  --topic-rule-payload "{
+    \"sql\": \"SELECT * FROM 'ecg/alert'\",
+    \"description\": \"Forward ECG alert to SNS email\",
+    \"actions\": [{
+      \"sns\": {
+        \"targetArn\": \"$SNS_ARN\",
+        \"roleArn\": \"arn:aws:iam::XXXXXX:role/ecg-lambda-role\",
+        \"messageFormat\": \"RAW\"
+      }
+    }],
+    \"ruleDisabled\": false,
+    \"awsIotSqlVersion\": \"2016-03-23\"
+  }"
+```
+
+> `roleArn`: IoT can role co quyen sns:Publish. Tai dung ecg-lambda-role
+> (da co AmazonSNSFullAccess), nhung role nay phai cho phep iot.amazonaws.com
+> assume. Neu loi, tao role rieng cho IoT→SNS hoac them iot vao trust policy.
+
+---
+
 ## **Step 8: End-to-end test qua MQTT**
 
 Mo AWS Console → IoT Core → MQTT Test Client → Publish to topic:
 
-**Topic:** `ecg/ecg-device-001/waveform`
+**Topic:** `ecg/raw`
 
 **Payload:** copy noi dung `test_event.json` o Step 6
 
@@ -281,17 +327,22 @@ Sau khi publish:
 ## **Tom tat luong sau khi xong:**
 
 ```
-ESP32 ── MQTT publish ──> ecg/ecg-device-001/waveform
-                          │
-                  IoT Rule (SELECT *)
-                          │
-                          ▼
-                  Lambda ecg-inference
-                          │
-              ┌───────────┼───────────┐
-              ▼           ▼           ▼
-         DynamoDB     ONNX run    if VEB → SNS Email
-        (ecg-events)  (50ms)
+ESP32 ── publish ──> ecg/raw ──(gateway forward)──> AWS IoT Core
+                                                     │
+                                       IoT Rule: SELECT * FROM 'ecg/raw'
+                                                     │
+                                                     ▼
+                                          Lambda ecg-inference
+                                                     │
+                                  ┌──────────────────┼──────────────────┐
+                                  ▼                  ▼                   ▼
+                             DynamoDB           ONNX run        if alert → publish
+                            (ecg-events)        (verify)         MQTT 'ecg/alert'
+                                                                        │
+                                                          IoT Rule: SELECT * FROM 'ecg/alert'
+                                                                        │
+                                                                        ▼
+                                                                   SNS → Email
 ```
 
 Sau Step 8 chay OK → san sang code ESP32 (cascade logic publish MQTT).

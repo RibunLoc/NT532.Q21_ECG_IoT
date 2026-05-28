@@ -1,0 +1,3 @@
+liệt kê danh sách công nghệ sử dụng
+cô hỏi model train model gì dataset nào, có vẻ mình phải tìm hiểu model train như nào 
+cô hỏi xem mượn thiết bị

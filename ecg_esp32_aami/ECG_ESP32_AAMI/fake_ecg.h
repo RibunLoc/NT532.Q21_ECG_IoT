@@ -2,88 +2,71 @@
 #define FAKE_ECG_H
 
 // ── Fake ECG generator cho DEMO_MODE ─────────────────────────
-// Tao tin hieu gia mo phong nhip tim Normal (60-80 bpm)
+// Phat lai BEAT THAT tu MIT-BIH (file fake_real_beats.h, export tu notebook).
+// Beat that = model nhan DUNG 100% khi demo (vi day la du lieu no train).
 //
-// Pattern moi nhip ~ 360 samples (1 giay tai 360Hz, ~60bpm):
-//   P-wave   : sample 50-80   (small bump, +0.1)
-//   PQ       : 80-130          (baseline)
-//   QRS      : 130-160         (R-peak +1.0 sample 145)
-//   ST       : 160-200         (baseline)
-//   T-wave   : 200-260         (medium bump, +0.3)
-//   rest     : 260-360         (baseline)
+// Type: 0=Normal  1=SVE(S)  2=VEB(V)  3=Fusion(F)  (khop REAL_BEATS[])
 //
-// Output range: [0, 1] de khop voi analogRead() / 4095.0f
+// Beat that da z-score normalize (~ -3..+3). Pipeline ESP32 lay ADC roi z-score
+// LAI — vi z-score bat bien voi scale/offset tuyen tinh, ta map beat ve [0,1]
+// roi pipeline chuan hoa lai se ra dung dang -> model nhan dung.
+//
+// Beat dai 187 mau. Phat tuan tu, lap lai (mo phong nhip lien tiep cung loai).
 
-#include <math.h>
+#include "fake_real_beats.h"
 
-// Counter mo phong vi tri trong cycle (0..359)
-static int fake_cycle_pos = 0;
-static int fake_beat_type = 0;   // 0=Normal, 1=VEB (test alert)
+static int fake_beat_type = 0;   // set tu ngoai (setFakeBeatType)
+static int fake_idx = 0;         // vi tri trong beat 187 mau
 
-// Generate 1 sample fake ECG
-// Tra ve gia tri trong [0.0, 1.0] (giong analogRead/4095)
+// Min/max cua tung beat (moi beat dai khac nhau) -> map ve [0,1] giu dung dang.
+// Tinh 1 lan khi doi type.
+static float _bmin = 0, _bmax = 1;
+static void _computeRange() {
+    const float* b = REAL_BEATS[fake_beat_type];
+    _bmin = b[0]; _bmax = b[0];
+    for (int i = 1; i < 187; i++) {
+        if (b[i] < _bmin) _bmin = b[i];
+        if (b[i] > _bmax) _bmax = b[i];
+    }
+    if (_bmax - _bmin < 1e-6f) _bmax = _bmin + 1e-6f;
+}
+
+// Chu ky 1 nhip = 187 mau beat + nghi baseline. Tong ~480 mau @360Hz = ~1.33s
+// (~75 bpm) -> song giong tim that, khong don dap.
+#define BEAT_LEN     187
+#define REST_LEN     293            // nghi sau beat (baseline)
+#define CYCLE_LEN    (BEAT_LEN + REST_LEN)   // 480
+
+static bool _new_beat = false;      // co bao dau 1 nhip moi (de bip 1 lan)
+
+void setFakeBeatType(int t) {
+    if (t < 0) t = 0; if (t > 3) t = 3;
+    fake_beat_type = t;
+    fake_idx = 0;
+    _computeRange();
+}
+
+// .ino doc co nay de bip 1 lan moi nhip
+bool fakeNewBeat() { bool b = _new_beat; _new_beat = false; return b; }
+
 static float generate_fake_ecg() {
-    int p = fake_cycle_pos;
-    float val = 0.5f;   // baseline ~ giua range
-
-    if (fake_beat_type == 0) {
-        // ── Normal beat ──
-        if (p >= 50 && p < 80) {
-            // P-wave: hump nho
-            float t = (p - 50) / 30.0f;   // 0..1
-            val += 0.05f * sinf(t * 3.14159f);
-        }
-        else if (p >= 130 && p < 160) {
-            // QRS complex: spike cao
-            float t = (p - 130) / 30.0f;
-            if (t < 0.3f) {
-                val -= 0.1f * t / 0.3f;       // Q dip
-            } else if (t < 0.6f) {
-                val += 0.45f * sinf((t-0.3f) / 0.3f * 3.14159f);  // R-peak
-            } else {
-                val -= 0.05f * (1.0f - (t-0.6f)/0.4f);   // S
-            }
-        }
-        else if (p >= 200 && p < 260) {
-            // T-wave: hump trung binh
-            float t = (p - 200) / 60.0f;
-            val += 0.15f * sinf(t * 3.14159f);
-        }
+    float z;
+    if (fake_idx < BEAT_LEN) {
+        z = REAL_BEATS[fake_beat_type][fake_idx];   // dang trong beat
     } else {
-        // ── VEB beat (rong, khong P-wave) ──
-        if (p >= 110 && p < 180) {
-            // QRS rong gap doi Normal
-            float t = (p - 110) / 70.0f;
-            val += 0.5f * sinf(t * 3.14159f);
-        }
-        else if (p >= 200 && p < 260) {
-            // T-wave nguoc dau (negative)
-            float t = (p - 200) / 60.0f;
-            val -= 0.2f * sinf(t * 3.14159f);
-        }
+        z = REAL_BEATS[fake_beat_type][0];          // nghi: giu baseline (mau dau)
     }
 
-    // Them noise nho cho realistic
-    val += ((float)random(-50, 50)) / 10000.0f;
+    fake_idx++;
+    if (fake_idx >= CYCLE_LEN) {
+        fake_idx = 0;
+        _new_beat = true;     // bat dau nhip moi -> .ino se bip
+    }
 
-    // Clip ve [0, 1]
+    float val = 0.1f + 0.8f * (z - _bmin) / (_bmax - _bmin);
+    val += ((float)random(-30, 30)) / 10000.0f;
     if (val < 0.0f) val = 0.0f;
     if (val > 1.0f) val = 1.0f;
-
-    // Tang counter, doi beat type sau moi 5 nhip
-    fake_cycle_pos++;
-    if (fake_cycle_pos >= 360) {
-        fake_cycle_pos = 0;
-        // Cu 5 Normal -> 1 VEB de test alert
-        static int beat_count = 0;
-        beat_count++;
-        if (beat_count % 6 == 5) {
-            fake_beat_type = 1;   // VEB
-        } else {
-            fake_beat_type = 0;   // Normal
-        }
-    }
-
     return val;
 }
 

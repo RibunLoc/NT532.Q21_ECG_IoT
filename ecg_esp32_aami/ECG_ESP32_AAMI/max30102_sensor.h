@@ -113,14 +113,34 @@ static void _computeSpO2() {
         }
     }
 
+    // ── Tính NHỊP TIM (BPM) từ tín hiệu IR ──────────────
+    // Đếm số đỉnh nhịp đập trong cửa sổ 100 mẫu @25Hz = 4 giây.
+    // Đỉnh = điểm IR vượt ngưỡng (DC + 0.4*biên độ) và là local max.
+    int hr = 0;
+    if (irAC_pp > irDC / 300 && irDC > 50000) {   // có ngón tay + có nhịp đập
+        double thr = irDC + 0.4 * (irMax - irDC);   // ngưỡng phát hiện đỉnh
+        int peaks = 0;
+        int last_peak = -10;
+        for (int i = 1; i < MAX_BUFFER_LEN - 1; i++) {
+            if (_irBuffer[i] > thr &&
+                _irBuffer[i] >= _irBuffer[i-1] &&
+                _irBuffer[i] >  _irBuffer[i+1] &&
+                (i - last_peak) >= 5) {   // tối thiểu 5 mẫu giữa 2 đỉnh (~200bpm max)
+                peaks++; last_peak = i;
+            }
+        }
+        // 100 mẫu @25Hz = 4s → BPM = peaks * (60/4) = peaks * 15
+        hr = peaks * 15;
+        if (hr < 30 || hr > 220) hr = 0;   // lọc dải sinh lý
+    }
+
     bool ok = spo2 >= 70 && spo2 <= 100;
     _valid = ok;
     _spo2  = ok ? spo2 : 0;
-    // HR: dùng BPM từ ECG R-peak (chính xác hơn PPG); để 0 ở đây.
-    _hr    = 0;
+    _hr    = hr;   // BPM từ MAX30102 (PPG) — AD8232 chỉ lo sóng ECG
 
-    Serial.printf("[MAX30102] irDC=%.0f redDC=%.0f irAC=%.1f redAC=%.1f R=%.3f SpO2=%d -> %s\n",
-        irDC, redDC, irAC, redAC, R, spo2, ok ? "OK" : "skip");
+    Serial.printf("[MAX30102] irDC=%.0f irAC=%.1f R=%.3f SpO2=%d HR=%d -> %s\n",
+        irDC, irAC, R, spo2, hr, ok ? "OK" : "skip");
 }
 
 // ── Poll non-blocking: gọi mỗi vòng loop() ──────────────

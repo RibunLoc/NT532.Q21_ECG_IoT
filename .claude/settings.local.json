@@ -1,7 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(\"/c/Users/LOC/AppData/Local/Arduino15/packages/esp32/tools/esp-x32/2601/bin/xtensa-esp32-elf-addr2line.exe\" -pfiaC -e \"C:\\\\Users\\\\LOC\\\\AppData\\\\Local\\\\arduino\\\\sketches\\\\020BD45DD7559FF827336658711A74FE\\\\ECG_ESP32_AAMI.ino.elf\" 0x4016defe 0x400d494f 0x400df664 0x4008d721)"
+      "Bash(\"/c/Users/LOC/AppData/Local/Arduino15/packages/esp32/tools/esp-x32/2601/bin/xtensa-esp32-elf-addr2line.exe\" -pfiaC -e \"C:\\\\Users\\\\LOC\\\\AppData\\\\Local\\\\arduino\\\\sketches\\\\020BD45DD7559FF827336658711A74FE\\\\ECG_ESP32_AAMI.ino.elf\" 0x4016defe 0x400d494f 0x400df664 0x4008d721)",
+      "Bash(aws lambda *)",
+      "Bash(grep -l \"bg-gray-9\\\\|text-gray-1\\\\|📊\\\\|📈\\\\|🔔\\\\|⚙️\\\\|❤️\\\\|🤖\\\\|⚠️\\\\|✅\\\\|☁️\" app/alerts/page.tsx app/history/page.tsx app/settings/page.tsx app/report/page.tsx)",
+      "Bash(wc -l app/alerts/page.tsx app/history/page.tsx app/settings/page.tsx app/report/page.tsx)",
+      "Bash(timeout 35 npx next build --no-lint)",
+      "Bash(timeout 90 npx tsc --noEmit -p tsconfig.json)",
+      "Bash(aws iot *)",
+      "Bash(./venv/Scripts/python.exe -c \"import paho.mqtt; print\\('paho', paho.mqtt.__version__\\)\")",
+      "Bash(./venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('gateway.py',encoding='utf-8'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(awk '{print $5\" bytes \\(\"int\\($5/1024\\)\" KB\\)\"}')",
+      "Bash(awk '{print $5\" bytes\"}')",
+      "mcp__claude_ai_Excalidraw__read_me"
     ]
   }
 }
