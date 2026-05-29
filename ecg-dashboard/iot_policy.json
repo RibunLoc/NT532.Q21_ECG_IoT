@@ -1,0 +1,30 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "iot:Connect",
+      "Resource": "arn:aws:iot:ap-southeast-1:758497006160:client/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Subscribe",
+      "Resource": [
+        "arn:aws:iot:ap-southeast-1:758497006160:topicfilter/ecg/result",
+        "arn:aws:iot:ap-southeast-1:758497006160:topicfilter/ecg/raw",
+        "arn:aws:iot:ap-southeast-1:758497006160:topicfilter/ecg/alert",
+        "arn:aws:iot:ap-southeast-1:758497006160:topicfilter/ecg/verified"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Receive",
+      "Resource": [
+        "arn:aws:iot:ap-southeast-1:758497006160:topic/ecg/result",
+        "arn:aws:iot:ap-southeast-1:758497006160:topic/ecg/raw",
+        "arn:aws:iot:ap-southeast-1:758497006160:topic/ecg/alert",
+        "arn:aws:iot:ap-southeast-1:758497006160:topic/ecg/verified"
+      ]
+    }
+  ]
+}
