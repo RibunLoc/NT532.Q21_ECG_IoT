@@ -52,12 +52,19 @@ static int find_r_peak(const float* squared, int length) {
     int center = length / 2;     // 540/2 = 270
     int search_range = 100;       // ±100 samples ~ ±278ms (du 1 nhip o 60bpm)
 
-    // Tim max global de set threshold dynamic
-    float max_val = 0;
-    for (int i = 0; i < length; i++) {
-        if (squared[i] > max_val) max_val = squared[i];
-    }
-    float threshold = max_val * 0.5f;
+    // Adaptive threshold robust voi outlier: dung mean + k*std thay vi 0.5*max.
+    // Khi co spike (motion artifact), max bi keo len cao -> bo qua peak that.
+    // Mean+std on dinh hon vi spike chiem ti le nho trong 540 mau.
+    float sum = 0;
+    for (int i = 0; i < length; i++) sum += squared[i];
+    float mean = sum / length;
+    float var = 0;
+    for (int i = 0; i < length; i++) { float d = squared[i] - mean; var += d*d; }
+    float stddev = sqrtf(var / length);
+    // Threshold = mean + 3*std (R-peak thuong cao gap nhieu lan noise level)
+    float threshold = mean + 3.0f * stddev;
+    // Floor: neu noise rat thap, threshold tuyet doi 0.01 de loai duong bang
+    if (threshold < 0.01f) threshold = 0.01f;
 
     // Tim local max trong vung center
     int   best_peak = -1;

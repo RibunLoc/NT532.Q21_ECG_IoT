@@ -45,3 +45,6 @@ desktop.ini
 .vscode/settings.json
 .idea/
 *.swp
+.claude
+
+VideoDemo

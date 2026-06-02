@@ -43,4 +43,10 @@
 // 0: dùng AD8232 thật
 #define DEMO_MODE 1
 
+// ── ECG signal polarity ──
+// AD8232 tuy theo vi tri dan dien cuc co the cho R-peak HUONG XUONG (negative).
+// CNN train tren MIT-BIH MLII voi R-peak HUONG LEN. Neu peak xuong -> set =1
+// de dao dau tin hieu cho CNN -> peak ve huong dung -> CNN du doan chinh xac.
+#define INVERT_ECG_POLARITY 0
+
 #endif

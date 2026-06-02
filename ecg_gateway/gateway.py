@@ -1,9 +1,21 @@
 import json
 import ssl
 import time
+import socket
 import paho.mqtt.client as mqtt
 
+# ── Ép IPv4 ──────────────────────────────────────────────
+# DNS của AWS IoT trả cả IPv6 (AAAA) lẫn IPv4 (A). Máy không có route
+# IPv6 hợp lệ -> paho thử IPv6 trước và văng WinError 10049.
+# Patch getaddrinfo để chỉ trả địa chỉ IPv4 (AF_INET).
+_orig_getaddrinfo = socket.getaddrinfo
+def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = _ipv4_only_getaddrinfo
+
 # ── Cấu hình Local (ESP32 → Laptop) ─────────────────────
+# Gateway là CLIENT connect tới broker local -> dùng 127.0.0.1.
+# (0.0.0.0 là địa chỉ để BROKER lắng nghe, không phải để client connect.)
 LOCAL_BROKER = "127.0.0.1"
 LOCAL_PORT = 1883
 LOCAL_TOPICS = [

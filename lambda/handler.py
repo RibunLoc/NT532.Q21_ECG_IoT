@@ -67,9 +67,18 @@ def lambda_handler(event, _context):
         # Ưu tiên server_time, fallback về time.time() nếu không có
         raw_ts = event.get('server_time') or event.get('timestamp', 0)
         ts = int(raw_ts / 1000) if raw_ts > 1_000_000_000_000 else int(raw_ts) or int(time.time())
-        # ESP32 gửi 'label'+'confidence', gateway/cloud dùng 'edge_label'+'edge_confidence'
-        edge_label = event.get('edge_label') or event.get('label', 'unknown')
-        edge_conf  = float(event.get('edge_confidence') or event.get('confidence', 0.0))
+        # Edge raw label (CNN goc, truoc fallback) — dung cho CASCADE decision
+        # (chi alert khi raw_label edge VA cloud cung phat hien bat thuong).
+        edge_raw_label = (event.get('raw_label')
+                          or event.get('edge_label')
+                          or event.get('label', 'unknown'))
+        edge_conf  = float(event.get('raw_confidence')
+                           or event.get('edge_confidence')
+                           or event.get('confidence', 0.0))
+        # Edge DISPLAY label (sau fallback) — dung cho `agrees` (UI consistency)
+        edge_display_label = event.get('label', edge_raw_label)
+        # backward compat: code phia duoi van dung bien edge_label cho cascade
+        edge_label = edge_raw_label
         samples    = event['samples']
 
         # SpO2 + HR từ MAX30102 (0 nếu chưa đặt ngón tay / device cũ không gửi)
@@ -113,6 +122,24 @@ def lambda_handler(event, _context):
             'is_alert':         is_alert,
             'source':           'cloud-verified',
         })
+
+        # ── LUON publish ket qua verify len ecg/verified -> dashboard cap nhat
+        # trang thai cloud realtime (du co alert hay khong)
+        verified_payload = {
+            'device_id':        device_id,
+            'timestamp':        ts,
+            'iso_timestamp':    iso_ts,
+            'edge_label':       edge_label,
+            'edge_confidence':  round(edge_conf, 4),
+            'cloud_label':      cloud_label,
+            'cloud_confidence': round(cloud_conf, 4),
+            'agrees':           edge_display_label == cloud_label,   # so sanh label HIEN THI (sau fallback) cho UI
+            'is_alert':         is_alert,
+        }
+        try:
+            iot_data.publish(topic='ecg/verified', qos=0, payload=json.dumps(verified_payload))
+        except Exception as e:
+            print(f'verified publish err: {e}')
 
         # ── Cloud confirm bat thuong → publish ecg/alert → IoT Rule trigger SNS
         if is_alert:

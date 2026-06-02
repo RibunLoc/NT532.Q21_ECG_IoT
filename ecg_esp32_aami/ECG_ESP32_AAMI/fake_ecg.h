@@ -15,7 +15,7 @@
 
 #include "fake_real_beats.h"
 
-static int fake_beat_type = 0;   // set tu ngoai (setFakeBeatType)
+int fake_beat_type = 0;          // set tu ngoai (setFakeBeatType) — extern de .ino bypass R-peak
 static int fake_idx = 0;         // vi tri trong beat 187 mau
 
 // Min/max cua tung beat (moi beat dai khac nhau) -> map ve [0,1] giu dung dang.

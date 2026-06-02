@@ -112,6 +112,17 @@ void oledPushSample(float val) {
     wave_head = (wave_head + 1) % WAVE_COLS;
 }
 
+// Lay N mau gan nhat theo thu tu thoi gian (cu->moi) cho dashboard.
+// Dung CHUNG buffer wave_val nen song dashboard == song OLED.
+int oledCopyLatestSamples(float* dst, int maxN) {
+    int n = (maxN > WAVE_COLS) ? WAVE_COLS : maxN;
+    int start = (wave_head - n + WAVE_COLS) % WAVE_COLS;
+    for (int i = 0; i < n; i++) {
+        dst[i] = wave_val[(start + i) % WAVE_COLS];
+    }
+    return n;
+}
+
 // ── MÀN 1: vẽ sóng ECG (full màn, auto-scale) ───────────
 void oledDrawWave() {
     oledWave.clearDisplay();

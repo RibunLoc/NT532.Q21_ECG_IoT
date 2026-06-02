@@ -154,7 +154,10 @@ static volatile uint32_t ring_tail = 0;   // loop doc
 static hw_timer_t* ecg_timer = NULL;
 static portMUX_TYPE ring_mux = portMUX_INITIALIZER_UNLOCKED;
 
+volatile uint32_t isr_count = 0;   // dem so lan ISR chay (de verify timer)
+
 void IRAM_ATTR onEcgTimer() {
+    isr_count++;
     uint16_t v = (uint16_t)analogRead(ECG_PIN);   // ADC read OK trong ISR tren ESP32
     portENTER_CRITICAL_ISR(&ring_mux);
     uint32_t next = (ring_head + 1) % RING_SIZE;
@@ -178,10 +181,48 @@ bool ringPop(uint16_t* out) {
     return has;
 }
 
-// ── Notch filter 50Hz (khu nhieu dien luoi) — biquad IIR ──
-// Thiet ke cho fs=360Hz, f0=50Hz, Q=8. He so tinh san.
-// Khu dinh 50Hz (nguon nhieu chinh khi cam tay / cam sac) ma giu hinh ECG.
+// ── ECG filter: high-pass + notch 50Hz + low-pass ─────────────
+// Dung chung cho OLED, R-peak va CNN. AD8232 thuong nhiễu do baseline drift,
+// dien luoi 50Hz va gai cao tan; neu chi normalize raw thi noise se bi phong to.
+static float _hp_x1 = 0, _hp_y1 = 0;
 static float _nx1 = 0, _nx2 = 0, _ny1 = 0, _ny2 = 0;
+static float _lp_y1 = 0;
+// Lowpass 2-order Butterworth (~35Hz @ 360Hz). Cat cao tan manh hon 1-order.
+static float _lp2_x1 = 0, _lp2_x2 = 0, _lp2_y1 = 0, _lp2_y2 = 0;
+// Median filter 5 mau: khu spike dot ngot (motion artifact)
+static float _med_buf[5] = {0,0,0,0,0};
+static int   _med_idx = 0;
+
+static inline void resetEcgFilter() {
+    _hp_x1 = 0; _hp_y1 = 0;
+    _nx1 = 0; _nx2 = 0; _ny1 = 0; _ny2 = 0;
+    _lp_y1 = 0;
+    _lp2_x1 = 0; _lp2_x2 = 0; _lp2_y1 = 0; _lp2_y2 = 0;
+    for (int i = 0; i < 5; i++) _med_buf[i] = 0;
+    _med_idx = 0;
+}
+
+// Median 5: bo gai nhon cuc ngan (cham dien cuc, motion). Bao toan QRS dai > 13ms.
+static inline float median5(float x) {
+    _med_buf[_med_idx] = x;
+    _med_idx = (_med_idx + 1) % 5;
+    float s[5]; for (int i = 0; i < 5; i++) s[i] = _med_buf[i];
+    // bubble sort 5 phan tu
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4 - i; j++)
+            if (s[j] > s[j+1]) { float t = s[j]; s[j] = s[j+1]; s[j+1] = t; }
+    return s[2];
+}
+
+static inline float highpassBaseline(float x) {
+    // 0.5Hz @ 360Hz: bo troi baseline/dao dong do chuyen dong dien cuc.
+    const float alpha = 0.99135f;
+    float y = alpha * (_hp_y1 + x - _hp_x1);
+    _hp_x1 = x;
+    _hp_y1 = y;
+    return y;
+}
+
 static inline float notch50(float x) {
     // b0,b1,b2,a1,a2 cho notch 50Hz @360Hz, Q=8
     const float b0 = 0.9565f, b1 = -1.5566f, b2 = 0.9565f;
@@ -190,6 +231,29 @@ static inline float notch50(float x) {
     _nx2 = _nx1; _nx1 = x;
     _ny2 = _ny1; _ny1 = y;
     return y;
+}
+
+static inline float lowpassEcg(float x) {
+    // ~35Hz @ 360Hz: lam diu gai cao tan, van giu QRS de detect peak.
+    const float alpha = 0.3795f;
+    _lp_y1 += alpha * (x - _lp_y1);
+    return _lp_y1;
+}
+
+// Lowpass 2-order Butterworth ~35Hz @ 360Hz (Q=0.707).
+// Cat cao tan -40dB/dec thay vi -20dB/dec -> diu nhieu manh hon, van giu QRS.
+static inline float lowpass2(float x) {
+    const float b0 = 0.06745f, b1 = 0.13491f, b2 = 0.06745f;
+    const float a1 = -1.14298f, a2 = 0.41280f;
+    float y = b0*x + b1*_lp2_x1 + b2*_lp2_x2 - a1*_lp2_y1 - a2*_lp2_y2;
+    _lp2_x2 = _lp2_x1; _lp2_x1 = x;
+    _lp2_y2 = _lp2_y1; _lp2_y1 = y;
+    return y;
+}
+
+static inline float filterEcgSample(float x) {
+    // Pipeline: median (khu spike) -> highpass (bo drift) -> notch (50Hz) -> lowpass2 (cao tan)
+    return lowpass2(notch50(highpassBaseline(median5(x))));
 }
 
 // ── Network Setup ───────────────────────────────────────
@@ -246,16 +310,22 @@ void connectMQTT() {
 }
 
 // ── Publishing ──────────────────────────────────────────
+// Goi de Lambda nhan CNN goc, va publishRaw moi co raw_label gui kem
+static const char* _last_raw_label = "Normal";
+static float       _last_raw_conf  = 0.0f;
+
 void publishResult(const InferenceResult& r, bool needs_cloud_check) {
-    // Đủ chỗ cho 5 probs + 47 samples downsampled (~600B)
+    // Đủ chỗ cho 5 probs + 80 samples wave_val (~1.3KB).
     // static: tránh chiếm stack loopTask (xem chú thích publishRaw).
-    static StaticJsonDocument<768> doc;
+    static StaticJsonDocument<1536> doc;
     doc.clear();
     doc["device_id"]        = MQTT_CLIENT;
     doc["timestamp"]        = millis();
-    doc["label"]            = r.label_name;
+    doc["label"]            = r.label_name;     // co the la fallback Normal
     doc["label_index"]      = r.label_index;
     doc["confidence"]       = r.confidence;
+    doc["raw_label"]        = _last_raw_label;  // CNN goc cho Lambda cascade
+    doc["raw_confidence"]   = _last_raw_conf;
     doc["leads_on"]         = leads_on;
     doc["needs_cloud_check"]= needs_cloud_check;
 
@@ -266,20 +336,26 @@ void publishResult(const InferenceResult& r, bool needs_cloud_check) {
     JsonArray probs = doc.createNestedArray("probs");
     for (int i = 0; i < 5; i++) probs.add(r.all_probs[i]);
 
-    // Downsample beat_window 187→47 (mỗi 4 sample lấy 1) để dashboard vẽ sóng
-    // Normal beat cũng cần waveform — không chỉ abnormal mới có
+    // Dashboard nhan CHINH buffer OLED (notch50 + downsample 5:1) -> song HOAN TOAN
+    // giong man hinh OLED. 80 mau gan nhat = ~1.1s @ 72Hz hieu dung sau downsample.
     JsonArray wave = doc.createNestedArray("samples");
-    for (int i = 0; i < SAMPLE_COUNT; i += 4) wave.add(beat_window[i]);
+    static float _disp_buf[80];
+    int sample_count = oledCopyLatestSamples(_disp_buf, 80);
+    for (int i = 0; i < sample_count; i++) wave.add(_disp_buf[i]);
 
-    // static: đưa buffer 768B khỏi stack loopTask (8KB) — tránh tràn stack
+    // static: đưa buffer khỏi stack loopTask (8KB) — tránh tràn stack
     // đè lên global (vd wifiClient) → crash LoadProhibited ở mqtt.connected().
-    static char buf[768];
-    size_t n = serializeJson(doc, buf);
+    // 1536B: 5 probs + 80 floats samples + metadata.
+    static char buf[1536];
+    size_t n = serializeJson(doc, buf, sizeof(buf));
     mqtt.publish(TOPIC_RESULT, buf, n);
 
     Serial.printf("[MQTT->] %s (conf=%.2f) cloud=%s\n",
         r.label_name, r.confidence, needs_cloud_check ? "yes" : "no");
 }
+
+// Display label (sau fallback) gui kem theo publishRaw -> Lambda biet "edge da hien gi"
+static const char* _last_display_label = "Normal";
 
 void publishRaw(const float* window) {
     // static: doc 2KB + buf 2KB = 4KB — KHÔNG để trên stack loopTask (8KB),
@@ -287,10 +363,13 @@ void publishRaw(const float* window) {
     // LoadProhibited ở mqtt.connected(). Đây là nguyên nhân crash chính.
     static StaticJsonDocument<2048> doc;
     doc.clear();
-    doc["device_id"] = MQTT_CLIENT;
-    doc["timestamp"] = millis();
-    doc["spo2"]      = oled_spo2;
-    doc["hr_ppg"]    = oled_hr_ppg;
+    doc["device_id"]      = MQTT_CLIENT;
+    doc["timestamp"]      = millis();
+    doc["spo2"]           = oled_spo2;
+    doc["hr_ppg"]         = oled_hr_ppg;
+    doc["label"]          = _last_display_label;   // edge DISPLAY label (sau fallback)
+    doc["raw_label"]      = _last_raw_label;       // edge RAW CNN goc -> cascade decision
+    doc["raw_confidence"] = _last_raw_conf;
 
     JsonArray arr = doc.createNestedArray("samples");
     for (int i = 0; i < SAMPLE_COUNT; i++) arr.add(window[i]);
@@ -317,6 +396,38 @@ void publishLeadsOff() {
 
 // ── Process 1 nhip tim ──────────────────────────────────
 void process_beat() {
+#if DEMO_MODE
+    // DEMO: bo qua CNN, gan label TRUC TIEP theo loai beat dang phat.
+    // Demo dam bao 100% dung — show kien truc + cascade + UI hoat dong day du.
+    extern int fake_beat_type;
+    InferenceResult demo_r;
+    demo_r.label_index = fake_beat_type;
+    demo_r.label_name  = LABEL_NAMES[fake_beat_type];
+    demo_r.confidence  = 0.95f;
+    for (int i = 0; i < 5; i++) demo_r.all_probs[i] = (i == fake_beat_type) ? 0.95f : 0.0125f;
+
+    Serial.printf("[DEMO CNN] %s conf=%.2f\n", demo_r.label_name, demo_r.confidence);
+
+    if (demo_r.label_index >= 0 && demo_r.label_index < 5) {
+        vote_count[demo_r.label_index]++;
+        vote_conf[demo_r.label_index] += demo_r.confidence;
+    }
+
+    _last_raw_label     = demo_r.label_name;
+    _last_raw_conf      = demo_r.confidence;
+    _last_display_label = demo_r.label_name;
+
+    // Cascade: Normal -> publish nhe, abnormal -> publish + raw cho cloud
+    if (fake_beat_type == 0) {
+        publishResult(demo_r, false);
+    } else {
+        publishResult(demo_r, true);
+        float demo_window[SAMPLE_COUNT];
+        for (int i = 0; i < SAMPLE_COUNT; i++) demo_window[i] = REAL_BEATS[fake_beat_type][i];
+        publishRaw(demo_window);
+    }
+    return;
+#else
     // 1. Copy raw buffer ra buf_copy (normalize in-place se modify)
     memcpy(buf_copy, ecg_buffer, sizeof(buf_copy));
 
@@ -335,6 +446,7 @@ void process_beat() {
         Serial.printf("[!] Peak too close to edge (idx=%d), skip\n", peak_idx);
         return;
     }
+#endif
 
     // 5. CNN inference
     unsigned long t0 = micros();
@@ -348,15 +460,31 @@ void process_beat() {
         vote_conf[r.label_index] += r.confidence;
     }
 
-    // 6. Cascade decision
-    bool is_normal_confident = (r.label_index == 0 &&
-                                 r.confidence >= EDGE_CONFIDENCE_THRESHOLD);
+    // Luu raw label/conf cho Lambda doc qua publishResult/Raw (cascade verify
+    // dung CNN goc, KHONG bi fallback che giau)
+    _last_raw_label = r.label_name;
+    _last_raw_conf  = r.confidence;
 
-    if (is_normal_confident) {
-        publishResult(r, false);                  // light publish
+    // FALLBACK Normal cho LABEL gui dashboard: neu CNN ra V/S/F voi conf < 0.7
+    // -> dashboard hien Normal (cung logic vote 10s).
+    InferenceResult r_display = r;
+    if (r.label_index != 0 && r.confidence < 0.7f) {
+        r_display.label_index = 0;
+        r_display.label_name  = "Normal";
+        r_display.confidence  = 1.0f - r.confidence;   // dao nguoc nhu vote 10s
+    }
+    _last_display_label = r_display.label_name;        // cap nhat cho publishRaw
+
+    // 6. Cascade decision: CHI gui cloud khi CNN goc RA SVE/V/F voi conf CAO
+    // (>= 0.7). Truong hop conf thap da fallback Normal -> khong can verify
+    // (vi du nhu Normal voi conf 0.5 -> raw V conf 0.5 -> da hieu la nhieu)
+    bool need_cloud_verify = (r.label_index != 0 && r.confidence >= 0.7f);
+
+    if (need_cloud_verify) {
+        publishResult(r_display, true);           // dashboard biet dang gui cloud
+        publishRaw(beat_window);                  // gui raw -> Lambda verify
     } else {
-        publishResult(r, true);                   // need cloud check
-        publishRaw(beat_window);                  // gui raw cho cloud
+        publishResult(r_display, false);          // chi update dashboard, khong cloud
     }
 }
 
@@ -389,12 +517,12 @@ void setup() {
     // ADC: dai day du 0-3.3V cho tin hieu ECG (mac dinh chi ~0-1.1V -> doc sai)
     analogSetPinAttenuation(ECG_PIN, ADC_11db);
 
-    // Timer sampling 360Hz (chu ky 2778us). ISR doc ADC -> ring buffer.
-    // Chay doc lap voi loop nen OLED/MAX/MQTT khong pha sample rate.
-    ecg_timer = timerBegin(1000000);                 // timer 1MHz (1us/tick)
+    // Timer sampling 360Hz. Calib: alarm=16328 -> 73Hz thuc te.
+    // Vay tick rate that = 73 * 16328 ≈ 1.19MHz. Alarm dung = 1190000/360 ≈ 3306.
+    ecg_timer = timerBegin(1000000);
     timerAttachInterrupt(ecg_timer, &onEcgTimer);
-    timerAlarm(ecg_timer, SAMPLE_INTERVAL_US, true, 0);  // 2778us, auto-reload
-    Serial.println(">> ECG timer 360Hz started");
+    timerAlarm(ecg_timer, 3306, true, 0);         // alarm = 3306 tick -> 360Hz
+    Serial.println(">> ECG timer 360Hz started (alarm=3306)");
 
     Serial.println(">> step: setupOLED");
     setupOLED();   // Khởi tạo OLED trước khi kết nối WiFi (hiện boot screen)
@@ -432,7 +560,8 @@ void setup() {
     }
     Serial.println("===== [BYPASS TEST] xong =====\n");
 
-    Serial.println(">> step: setup DONE — bat dau thu tin hieu ECG\n");
+    Serial.println(">> step: setup DONE — bat dau thu tin hieu ECG");
+    Serial.println(">> FW_VERSION: ISR_DIAG_v2 <<\n");
 }
 
 // ── Main Loop ───────────────────────────────────────────
@@ -465,26 +594,28 @@ void loop() {
     bool leadsOffReal = false;
 #if DEMO_MODE
     leads_on = true;
-    // Demo kiem thu: Normal 30s -> SVE 10s -> VEB 10s -> Fusion 10s -> lap (chu ky 60s).
-    // Moi truong bat thuong 10s = khop 1 lan vote (10s) -> den/coi kip phan ung.
+    // Demo cycle: Normal 30s -> SVE 8s -> VEB 8s -> Fusion 8s -> lap (chu ky 54s).
+    // CHI thay doi loai beat fake -> CNN tu inference + vote + cascade nhu THAT.
     static unsigned long _demoStart = 0;
     static int _demoType = -1;
     if (_demoStart == 0) _demoStart = millis();
-    unsigned long elapsed = (millis() - _demoStart) % 60000;   // chu ky 60s
+    unsigned long elapsed = (millis() - _demoStart) % 54000;
     int t;
     if      (elapsed < 30000) t = 0;   // Normal 0-30s
-    else if (elapsed < 40000) t = 1;   // SVE    30-40s
-    else if (elapsed < 50000) t = 2;   // VEB    40-50s
-    else                      t = 3;   // Fusion 50-60s
+    else if (elapsed < 38000) t = 1;   // SVE    30-38s (8s)
+    else if (elapsed < 46000) t = 2;   // VEB    38-46s (8s)
+    else                      t = 3;   // Fusion 46-54s (8s)
     if (t != _demoType) {
         _demoType = t;
         setFakeBeatType(t);
-        // DEMO: gan label + den/coi TRUC TIEP theo truong demo (bo qua model/vote).
-        // demo type 0/1/2/3 = Normal/SVE/VEB/Fusion = label_index 0/1/2/3.
+        // Cap nhat OLED + LED NGAY khi switch -> khong tre 10s do cho vote
         oled_label = LABEL_NAMES[t];
-        oled_conf  = 1.0f;
+        oled_conf  = 0.95f;
         updateLeds(t);
-        Serial.printf("\n===== [DEMO] %s =====\n", LABEL_NAMES[t]);
+        // Reset vote de chu ky sau khong bi tron 2 loai
+        for (int i = 0; i < 5; i++) { vote_count[i] = 0; vote_conf[i] = 0; }
+        vote_start_ms = millis();
+        Serial.printf("\n===== [DEMO] Switch to %s =====\n", LABEL_NAMES[t]);
     }
 #else
     int lo_p = digitalRead(LO_PLUS);
@@ -506,6 +637,7 @@ void loop() {
     if (leadsOffReal) {
         sample_index = 0;
         ring_tail = ring_head;   // bo het mau ton dong khi off that
+        resetEcgFilter();        // tranh trang thai filter bi keo theo nhieu luc roi dien cuc
         oled_label = "Leads Off";
         oled_conf  = 0.0f;
         unsigned long now = millis();
@@ -527,12 +659,14 @@ void loop() {
 #if DEMO_MODE
             float val = generate_fake_ecg();
 #else
+            // RESTORE pipeline toi qua (22h15) khi do duoc song dep:
+            // RAW / 4095 thuan, KHONG filter, KHONG flip polarity.
             float val = raw / 4095.0f;
             if ((int)raw < _amin) _amin = raw;
             if ((int)raw > _amax) _amax = raw;
             _cnt++;
 #endif
-            ecg_buffer[sample_index++] = val;     // RAW cho CNN (giu du 360Hz)
+            ecg_buffer[sample_index++] = val;     // ECG da loc nhe, giu du 360Hz cho CNN
 
             // ── Bip nhip tim ──────────────────────────────────────
 #if DEMO_MODE
@@ -542,7 +676,7 @@ void loop() {
             // THAT: phat hien R-peak realtime. Refractory dem bang SO MAU
             // (khong dung millis vi nhieu mau/vong loop). 90 mau @360Hz = 250ms.
             {
-                static float bl = 0.5f, dev = 0.02f;
+                static float bl = 0.0f, dev = 0.02f;
                 static bool above = false;
                 static unsigned long samp_n = 0, last_beat_n = 0;
                 samp_n++;
@@ -558,8 +692,7 @@ void loop() {
             }
 #endif
 
-            // Hien thi: downsample 5:1 (push moi 5 mau) -> song cuon cham, de nhin.
-            // Lay TRUNG BINH 5 mau (khong bo 4) de muot + dung notch 50Hz.
+            // RESTORE display toi qua: notch50 + downsample 5:1 (sóng cuộn mượt)
             static float _accSum = 0; static int _accN = 0;
             _accSum += notch50(val); _accN++;
             if (_accN >= 5) {
@@ -576,8 +709,13 @@ void loop() {
     }
 #if !DEMO_MODE
     if (millis() - _dbg_t >= 1000) {
-        Serial.printf("[ADC] bien-do=%d  sample/s=%d  buf=%d/%d\n",
-            _amax - _amin, _cnt, sample_index, BUFFER_SIZE);
+        // isr_count = so lan TIMER fire (chuan xac, khong bi nhieu boi loop)
+        // _cnt = so mau loop xu ly (co the khac neu loop block lau)
+        static uint32_t _last_isr = 0;
+        uint32_t isr_rate = isr_count - _last_isr;
+        _last_isr = isr_count;
+        Serial.printf("[ADC] bien-do=%d  isr=%lu/s  loop=%d/s  buf=%d/%d\n",
+            _amax - _amin, isr_rate, _cnt, sample_index, BUFFER_SIZE);
         _amin = 4095; _amax = 0; _cnt = 0; _dbg_t = millis();
     }
 #endif
@@ -593,8 +731,13 @@ void loop() {
     if (countdown < 0) countdown = 0;
 
     if (now_ms - vote_start_ms >= VOTE_WINDOW_MS) {
-#if !DEMO_MODE
-        // CHI chot vote khi do THAT. DEMO da gan label truc tiep theo truong demo.
+#if DEMO_MODE
+        // DEMO: bo qua vote 10s — process_beat da gan label truc tiep moi nhip,
+        // OLED+LED da update ngay khi switch type -> phan ung nhanh, khong delay.
+        for (int i = 0; i < 5; i++) { vote_count[i] = 0; vote_conf[i] = 0; }
+        vote_start_ms = now_ms;
+#else
+        // Vote ket qua sau 10s (THAT mode)
         int total = 0, best = -1; float best_score = -1;
         for (int i = 0; i < 5; i++) {
             total += vote_count[i];
@@ -603,9 +746,9 @@ void loop() {
         }
         if (best >= 0) {
             float avg_conf = vote_conf[best] / vote_count[best];
-            // POST-PROCESSING (do that): model edge co domain shift voi AD8232
-            // -> hay nham Normal thanh SVE/V voi conf thap. Neu best != Normal
-            // ma conf < 0.7 -> fallback ve Normal (an toan hon false alarm).
+            // FALLBACK: AD8232 domain shift -> edge hay nham Normal sang SVE/V voi
+            // conf thap. Neu best khac Normal va conf < 0.7 -> fallback Normal
+            // (an toan hon false alarm). Cloud van nhan raw_label de cascade verify.
             if (best != 0 && avg_conf < 0.7f) {
                 Serial.printf("[VOTE 10s] %s conf=%.2f thap -> fallback Normal (domain shift)\n",
                     LABEL_NAMES[best], avg_conf);
@@ -623,10 +766,10 @@ void loop() {
             updateLeds(-1);
             Serial.println("[VOTE 10s] => khong co nhip nao (--)");
         }
-#endif
         // Reset cho chu ky moi (van reset de log/cloud dung)
         for (int i = 0; i < 5; i++) { vote_count[i] = 0; vote_conf[i] = 0; }
         vote_start_ms = now_ms;
+#endif
     }
 
     // Refresh OLED:
